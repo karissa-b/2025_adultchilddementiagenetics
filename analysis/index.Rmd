@@ -8,4 +8,11 @@ editor_options:
   chunk_output_type: console
 ---
 
-Welcome to my research website.
+This website describes how we analysed the genetics of adult- and childhood-onset dementia using network propogation and colocalisation to identify drug to reposition for these diseases. 
+
+We first looked at the genetics of adult-onset dementia (AD, PD, ALS, FTLD, DLB) and the childhood dementia subgroups described in [Elvidge et al. Brain](https://academic.oup.com/brain/article/146/11/4446/7226999)
+
+```{r}
+library(tidyverse)
+```
+
