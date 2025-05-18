@@ -3,5 +3,6 @@
 A [workflowr][] project.
 
 [workflowr]: https://github.com/workflowr/workflowr
-# 2025_adultchilddementiagenetics
-# 2025_adultchilddementiagenetics
+
+This website contains the code I used to analyse the genetics of adult- and childhood-onset dementia
+
