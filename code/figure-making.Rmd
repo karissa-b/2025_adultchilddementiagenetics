@@ -1,0 +1,372 @@
+---
+title: "figs"
+output: html_document
+date: "2025-07-18"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(qs) # for fast save and reading of objects into memory (alternative to rds)
+
+# annotation
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+
+
+# analysis
+library(Seurat)
+library(edgeR)
+library(clusterProfiler)
+
+# vis tools
+library(ggpubr)
+library(scales)
+library(patchwork)
+library(cowplot)
+library(viridisLite)
+library(ggeasy)
+library(ggfortify)
+library(ggrepel)
+library(tidyHeatmap)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+```
+
+# Import data
+```{r}
+# seurat objects
+seurat.object.paths = list.files(
+  path = "data/public data/", 
+  pattern = "seurat",
+  recursive = T,  full.names = T
+  )
+
+seurat_objects = list(
+  human_DLB = qread(
+    file = grep(seurat.object.paths, pattern = "GSE178146_RAW", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(seurat.object.paths, pattern = "NPC_mousebrain", value = T)
+    )
+)
+
+# pseudobulk DGE objects
+dge.object.paths = list.files(
+   path = "data/public data/", 
+  pattern = "pseudobulk",
+  recursive = T,  full.names = T
+  )
+
+y = list(
+  human_DLB = qread(
+    file = grep(dge.object.paths, pattern = "GSE178146_RAW", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(dge.object.paths, pattern = "NPC_mousebrain", value = T)
+    )
+)
+
+# toptables
+toptable.paths = list.files(
+  path = "data/public data/", 
+  pattern = "toptable",
+  recursive = T,  full.names = T
+)
+
+toptables = list(
+  human_DLB = qread(
+    file = grep(toptable.paths, pattern = "GSE178146_RAW", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(toptable.paths, pattern = "NPC_mousebrain", value = T)
+    )
+)
+
+# ORA
+ORA.clusters.paths = list.files(
+  path = "data/public data/", 
+  pattern = "ORA_clus",
+  recursive = T,  full.names = T
+)
+
+ORA.clusters = list(
+  human_DLB = qread(
+    file = grep(ORA.clusters.paths, pattern = "GSE178146_RAW", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(ORA.clusters.paths, pattern = "NPC_mousebrain", value = T)
+    )
+)
+
+ORA..DEGs.clusters.path = list.files(
+  path = "data/public data/", 
+  pattern = "ORA_DEGs_clus",
+  recursive = T,  full.names = T
+)
+
+ORA.DEGs.clusters = list(
+  human_DLB = qread(
+    file = grep(ORA..DEGs.clusters.path, pattern = "GSE178146_RAW", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(ORA..DEGs.clusters.path, pattern = "NPC_mousebrain", value = T)
+    )
+)
+
+# fry results
+fry.paths = list.files(
+    path = "data/public data/", 
+  pattern = "fry",
+  recursive = T,  full.names = T
+)
+
+fry.results = list(
+  human_DLB = qread(
+    file = grep(fry.paths, pattern = "GSE178146_RAW", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(fry.paths, pattern = "NPC_mousebrain", value = T)
+    )
+)
+
+# network genes
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster <- cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+
+# remove all the paths from env
+remove(list = c("fry.paths", "ORA..DEGs.clusters.path", "ORA.clusters.paths", "toptable.paths", "seurat.object.paths"))
+```
+
+# annotations
+the follkowing script converts mouse gene names to human gene names - useful for conversion. 
+```{r}
+# download the mouse2human id conversion
+mouse_human_genes = read.csv("http://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
+
+convert_mouse_to_human <- function(gene_list){
+
+# Filter to mouse genes in gene_list
+  mouse_subset <- mouse_human_genes %>%
+    dplyr::filter(Common.Organism.Name == "mouse, laboratory", Symbol %in% gene_list)
+
+  # Join with human genes via DB.Class.Key
+  result <- mouse_subset %>%
+    left_join(
+      mouse_human_genes %>%
+        dplyr::filter(Common.Organism.Name == "human") %>%
+        dplyr::select(DB.Class.Key, human_symbol = Symbol),
+      by = "DB.Class.Key"
+    ) %>%
+    dplyr::select(mouse = Symbol, human = human_symbol) %>%
+    dplyr::distinct() %>% 
+    as_tibble
+
+  return(result)
+}
+```
+
+# seurat objects and celltypes
+```{r}
+
+```
+
+# Volcano plots of each 
+```{r}
+toptables$human_DLB %>%
+  bind_rows() %>%
+  mutate(
+    coef = str_extract(coef, "(?<=DLB_).+(?= - Control_)"),
+    DE = FDR < 0.05
+  ) -> volcano_data
+
+# Count number of DE up/down per celltype (coef)
+volcano_labels <- volcano_data %>%
+  filter(DE) %>%
+  mutate(direction = ifelse(logFC > 0, "Up", "Down")) %>%
+  group_by(coef, direction) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(
+    x = ifelse(direction == "Up", 3, -3),  # approximate x positions
+    y = max(-log10(volcano_data$PValue), na.rm = TRUE) * 0.9,  # high y
+    label = paste0(direction, ": ", n)
+  )
+
+# Plot
+p1 <- ggplot(volcano_data, aes(x = logFC, y = -log10(PValue))) +
+  geom_point(aes(colour = DE)) +
+  scale_color_manual(values = c("grey50", "red")) +
+  facet_wrap(~coef) +
+  geom_text(
+    data = volcano_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4,
+    hjust = 0.5
+  ) +
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(P value)"
+  ) 
+```
+
+
+# ORA of the clusters within cell types of DE genes
+
+```{r}
+ORA.DEGs.clusters$human_DLB %>% 
+  lapply(as_tibble) %>% 
+  bind_rows(.id = "coef") %>% 
+  mutate(species = "human DLB") %>% 
+  dplyr::select(cluster = ID, everything()) %>% 
+  rbind(
+    ORA.DEGs.clusters$mouse_Npc1 %>% 
+      lapply(as_tibble) %>% 
+      bind_rows(.id = "coef") %>% 
+      mutate(species = "mouse Npc1") %>% 
+      dplyr::select(cluster = ID, everything())
+  ) %>% 
+  ggplot(
+    aes(y = coef, x = -log10(pvalue), fill = cluster)
+  ) +
+  geom_col(
+    position = "dodge"
+  ) +
+  facet_wrap(~species, 
+             dir = "v",
+             scales = "free_y",
+             strip.position = "right") +
+  ggsave(
+    "output/plots/DLB and NPC/overrep_clusters_pvals.png", 
+    width = 10, height = 5, units = "cm", scale = 2
+  )
+```
+
+# logFC of genes in Cluster 438 in microglia/immune cells
+```{r}
+# convert the mouse toptables to human gene ids
+
+mouse.microglia.7wk.toptab.humanid <- 
+toptables$mouse_Npc1$`Microglia_7week_Npc1 - Microglia_7week_WT` %>% 
+  left_join(
+    convert_mouse_to_human(
+      toptables$mouse_Npc1$`Microglia_7week_Npc1 - Microglia_7week_WT`$gene
+      ), c("gene" = "mouse")
+  ) %>% 
+  dplyr::select(gene = human, logFC, PValue, FDR) %>% 
+  mutate(
+    coef = "mouse Npc1 7wk"
+  )
+
+mouse.microglia.3wk.toptab.humanid <- 
+toptables$mouse_Npc1$`Microglia_3week_Npc1 - Microglia_3week_WT` %>% 
+  left_join(
+    convert_mouse_to_human(
+      toptables$mouse_Npc1$`Microglia_3week_Npc1 - Microglia_3week_WT`$gene
+      ), c("gene" = "mouse")
+  ) %>% 
+  dplyr::select(gene = human, logFC, PValue, FDR) %>% 
+  mutate(
+    coef = "mouse Npc1 3wk"
+  )
+
+human.microglia.toptab <- 
+  toptables$human_DLB$`DLB_microglia_immune - Control_microglia_immune` %>% 
+  dplyr::select(gene, logFC, PValue, FDR) %>% 
+  mutate(
+    coef = "human DLB"
+  )
+
+combined = bind_rows(mouse.microglia.7wk.toptab.humanid, mouse.microglia.3wk.toptab.humanid, human.microglia.toptab)
+
+keep = combined %>% 
+  dplyr::filter(
+    FDR < 0.05, 
+    gene %in% network.genes.cluster$C438
+    ) %>% 
+  .$gene %>% unique
+
+# Pivot to matrix format
+logFC_mat <- 
+  combined %>%
+  dplyr::select(gene, coef, logFC) %>%
+  dplyr::filter(gene %in% keep) %>% 
+  pivot_wider(names_from = coef, values_from = logFC, values_fn = mean) %>% 
+  column_to_rownames("gene") %>%
+  as.matrix() %>% 
+  t
+
+# Significance asterisk matrix
+sig_mat <- 
+  combined %>%
+  dplyr::select(gene, coef, FDR) %>%
+  dplyr::filter(gene %in% keep) %>% 
+  pivot_wider(names_from = coef, values_from = FDR, values_fn = mean) %>% 
+  column_to_rownames("gene") %>%
+  as.matrix() %>% 
+  t
+
+asterisks <- ifelse(sig_mat < 0.05, "*", "")
+
+# Color function
+col_fun <- colorRamp2(c(-2, 0, 2), c("#2166AC", "white", "#B2182B"))
+
+# Text annotation layer
+text_annot <- function(j, i, x, y, width, height, fill) {
+  grid.text(asterisks[i, j], x, y, gp = gpar(fontsize = 10))
+}
+
+ComplexHeatmap::Heatmap(
+  logFC_mat,
+  name = "logFC",
+  col = col_fun,
+  cell_fun = text_annot,
+  cluster_rows = TRUE,
+  cluster_columns = T,
+  row_names_gp = gpar(fontsize = 9),
+  column_names_gp = gpar(fontsize = 10, angle = 45),
+  show_heatmap_legend = TRUE,
+  heatmap_legend_param = list(title = "logFC", legend_height = unit(3, "cm"))
+)
+```
+
+
+
+
+
+
+
+
+
+

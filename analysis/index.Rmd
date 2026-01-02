@@ -8,11 +8,34 @@ editor_options:
   chunk_output_type: console
 ---
 
-This website describes how we analysed the genetics of adult- and childhood-onset dementia using network propogation and colocalisation to identify drug to reposition for these diseases. 
+This website describes how we analysed the genetics of adult- and childhood-onset dementia using network propogation and colocalisation to identify drugs to reposition for these diseases. 
 
 We first looked at the genetics of adult-onset dementia (AD, PD, ALS, FTLD, DLB) and the childhood dementia subgroups described in [Elvidge et al. Brain](https://academic.oup.com/brain/article/146/11/4446/7226999)
+```{r}
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
 
+- [neurodegen network: adult all vs childhood all](adultvCD.html)
+- [subgroup networks: adult vs childhood subgroups](adultvCDsubgroups.html)
+- [DLB human snRNAseq analysis](DLB_snRNaseq.html)
+
+
+## single cell seq datasets
+These are the scRNAseq datasets we will/are using to dissect the network genes in human adult neurodegen.
 ```{r}
 library(tidyverse)
+tribble(
+  ~disease, ~region, ~link,
+  "DLB, PD", "anterior cingulate cortex (BA24,32,33)", "https://pubmed.ncbi.nlm.nih.gov/34309761/", 
+  
+  "FTLD, ALS", "primary motor (BA4) and dorsolateral prefrontal cortices (BA9)", "https://www.cell.com/cell/fulltext/S0092-8674(24)00234-4#sec-4-2-3", 
+  
+  "AD", "AG (BA39), middle temporal gyrus (BA22), PFC: frontal pole (BA10), EC: entorhinal cortex (BA28), Posterior hippocampus (HC), TH: thalamus ","https://www.nature.com/articles/s41586-024-07606-7#Sec10"
+  
+  
+)
+
 ```
 

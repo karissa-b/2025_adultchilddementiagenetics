@@ -1,0 +1,2 @@
+category,subcategory,ID,Description,GeneRatio,BgRatio,RichFactor,FoldEnrichment,zScore,pvalue,p.adjust,qvalue,geneID,Count,comparison
+Cellular Processes,Transport and catabolism,hsa04137,Mitophagy - animal,8/80,99/7783,0.08080808080808081,7.861616161616162,7.0018208882318556,7.02857685798273e-6,7.169148395142385e-4,6.51068172107874e-4,7415/8878/387990/9101/54543/9804/7316/55669,8,CD_1F_perox_ALS

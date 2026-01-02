@@ -1,0 +1,1439 @@
+---
+title: "03_hsDLB_snRNAseq_pseudobulk"
+author: "Karissa Barthelson"
+date: "2025-07-04"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+# setup
+```{r}
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(qs) # for fast save and reading of objects into memory (alternative to rds)
+library(parallel) 
+library(Matrix)
+
+# annotation
+library(org.Hs.eg.db)
+library(KEGGREST)
+
+# analysis
+library(Seurat)
+library(ngsReports)
+library(edgeR)
+library(clusterProfiler)
+
+# vis tools
+library(ggpubr)
+library(scales)
+library(patchwork)
+library(cowplot)
+library(viridisLite)
+library(ggeasy)
+library(ggfortify)
+library(ggrepel)
+library(tidyHeatmap)
+library(ComplexHeatmap)
+library(grid)
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+```
+
+# Introduction
+Here, I will perform the pseudobulk comparisons within cell type between DLB and contorl brains. 
+
+The preprocessing of the data was performed previously and the seurat object was loaded. It was then converted to a PB object for use in edgeR.
+```{r}
+# read in smaple metadata
+meta <- 
+  data.table::fread("data/public data/GSE178146_RAW/GSE178146_series_matrix.txt", 
+                          skip = 27, sep = "\t", fill = T) %>% 
+  mutate(
+    `!Sample_title` = str_remove(`!Sample_title`, pattern = "\\!")
+  ) %>% 
+  t %>% 
+  .[,c(1,7,9)] %>% 
+  set_colnames(
+    c("geo_acc", "brain_region", "disease")
+  ) %>% 
+  .[-1,] %>% 
+  as.data.frame() %>% 
+  mutate(
+    sample = rownames(.), 
+    disease = str_remove(disease, pattern ="disease state: ")
+  ) %>% 
+  as_tibble()
+
+# seurat object
+data.seurat <- qread("data/public data/GSE178146_RAW/R_objects/PD_DLB_data_seurat.qs")
+
+# need to merge layers of the seurat object before converting to PB object
+# Seurat::DimPlot(data.seurat, 
+#         reduction = "umap", group.by = c("orig.ident", "celltype"), shuffle = TRUE)
+# 
+# Seurat::DimPlot(data.seurat, 
+#         reduction = "umap", 
+#         group.by = "celltype", 
+#         split.by = "disease",
+#         shuffle = TRUE)
+        
+data.seurat[["RNA"]] <- JoinLayers(data.seurat[["RNA"]])
+
+y <- Seurat2PB(data.seurat, sample="orig.ident", cluster="celltype")
+
+ # tidyup samples
+y$samples %<>% 
+  as_tibble(rownames = "sample_cluster") %>% 
+  left_join(meta %>% dplyr::select(sample, disease)) %>% 
+  mutate(
+    disease = factor(disease, levels = c("Control", "DLB", "PD", "PDD")), 
+    cluster = as.factor(cluster), 
+    sample_id = rownames(.),
+    sample_cluster = as.factor(sample_cluster),
+    disease_cluster = paste(disease, cluster, sep = "_") %>% as.factor
+  ) %>%  
+  column_to_rownames("sample_cluster") %>% 
+  mutate(sample_id = rownames(.))
+
+
+# Get all Entrez Gene IDs
+all_genes <- keys(org.Hs.eg.db, keytype = "SYMBOL")
+
+# Select gene SYMBOL and CHR (chromosome) info
+hs_chrs <- AnnotationDbi::select(org.Hs.eg.db,
+                    keys = all_genes,
+                    columns = c("SYMBOL", "CHR"),
+                    keytype = "SYMBOL")
+```
+
+# work out sex
+The sex of each donor was not provided by GEO. Here, i will look at this by assessing expression of genes on the Y chromosome. There appears to be reads are aligning to genes  on the Y chromosome, however, these are in the pseudoautosomal regiosns. Nevertheless, there are clear differences in expression of genes on the Y chr. 
+
+```{r}
+y %>% 
+  cpm(log=T) %>% 
+  as_tibble(rownames = "SYMBOL") %>% 
+  left_join(hs_chrs) %>% 
+  pivot_longer(names_to = "sample_cluster", 
+               values_to = "counts", rownames(y$samples)) %>% 
+  dplyr::filter(CHR == "Y") %>% 
+  mutate(
+    sample = str_remove(sample_cluster, pattern = "_cluster.+")
+  ) %>% 
+  ggplot(
+    aes(x = sample, y = counts)
+  ) +
+  geom_boxplot()+
+  facet_wrap(~CHR) +
+  scale_y_continuous(limits = c(0,10))
+```
+
+Whle the sample-spefiic info was NA in the paper and in GEO, there was this in the paper: 
+
+`proportion female: control = 1/7, PD = 5/7, PDD = 2/7, DLB = 0/7`
+
+So the samples which have low y-specific chr expression are likely the female samples. This all matches up nicely. 
+
+```{r}
+female.samples = c(
+  #control
+  "PDC87", 
+  #PD - 5 samples
+  "PD413", "PD416", "PD523", "PD666", "PD683", 
+  
+  # PDD - 2 samples
+  "PD366", "PD501"
+  )
+
+
+```
+
+```{r}
+y$counts %>% 
+  cpm(log=T) %>% 
+  as_tibble(rownames = "SYMBOL") %>% 
+  left_join(hs_chrs) %>% 
+  pivot_longer(names_to = "sample_cluster", 
+               values_to = "counts", rownames(y$samples)) %>% 
+  dplyr::filter(CHR == "Y") %>%
+  # dplyr::filter(SYMBOL %in% c("ZFY", "PCDH11Y", "USP9Y", "UTY")) %>% 
+  mutate(
+    sample = str_remove(sample_cluster, pattern = "_cluster.+"), 
+    sex = case_when(
+      sample %in% female.samples ~ "female", 
+      TRUE ~ "male"
+    ) %>% as.factor()
+  ) %>%
+  left_join(meta) %>% 
+  ggplot(
+    aes(x = sample, y = counts, fill = sex)
+  ) +
+  geom_boxplot()+
+  facet_wrap(~disease, scales = "free_x") +
+  scale_y_continuous(limits = c(0,10)) +
+  labs(
+    subtitle = "proportion female: control = 1/7, PD = 5/7, PDD = 2/7, DLB = 0/7"
+  )
+```
+
+```{r}
+# add this info back into y$samples
+y$samples %<>% 
+  mutate(
+    sex = case_when(
+      sample %in% female.samples ~ "female", 
+      TRUE ~ "male"
+    ) %>% as.factor()
+  ) 
+```
+
+## lib sizes
+```{r}
+y$samples %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample_cluster") %>% 
+  ggplot(
+    aes(x = sample_cluster, y = lib.size, fill = disease)
+  ) + 
+  geom_col() +
+  scale_y_continuous(labels = comma) +
+  facet_wrap(~cluster, scales = "free_x", nrow = 2) +
+  easy_rotate_x_labels(angle = -45)
+
+
+# retain samples with more than 50k counts
+keep.samples <- y$samples$lib.size > 5e4
+y <- y[,keep.samples]
+
+y$samples %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample_cluster") %>% 
+  mutate(sample_cluster = str_remove(sample_cluster,pattern = "cluster")) %>% 
+  ggplot(
+    aes(x = sample_cluster, y = lib.size, fill = disease)
+  ) + 
+  geom_col() +
+  scale_y_continuous(labels = comma) +
+  facet_wrap(~cluster, scales = "free", nrow = 2) +
+  easy_rotate_x_labels(angle = -45) +
+  labs(
+    title = "Library sizes after filtering"
+  )
+```
+
+After filtering the small pseudobulk libraries (50k reads was the recommended by the edgeR manual, but this left out too many libraries),There are some celltypes n.d. in all groups. 
+
+I will only retain clusters which are detected in all grousp. 
+
+
+```{r}
+clusters2remove = c("Endothelial", "VLMCs", "Neuron_Ex3", "Neuron_Ex4", "Neuron_Ex5", "Neuron_In1", "Neuron_In2")
+
+samples2keep <- y$samples %>% 
+  dplyr::filter(!cluster %in% clusters2remove) %>% 
+  rownames(.)
+
+# make a copy of y before filtering and filter low expressed genes
+y.before.removing.clusters = y
+keep.genes <- filterByExpr(
+  y.before.removing.clusters,  
+  group=y.before.removing.clusters$samples$cluster)
+
+y.before.removing.clusters <- y.before.removing.clusters[keep.genes, , keep=FALSE]
+
+y <- y[,samples2keep]
+```
+
+Then, lowly expressible genes are filterd. the table below shows the number of genes retained. TMM normalization is performed to estimate effective library sizes. 
+
+Lib sizes are much smaller in the DLB group. Is this biological or technical in nature?
+
+```{r}
+keep.genes <- filterByExpr(y, group=y$samples$cluster)
+table(keep.genes)
+y <- y[keep.genes, , keep=FALSE]
+
+y <- normLibSizes(y, method = "TMM")
+
+y$samples %>% 
+  ggplot(
+    aes(y = lib.size, x = cluster, colour = disease )
+  ) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge()) +
+  stat_compare_means() +
+  facet_wrap(~cluster, scales = "free_x")
+
+y %>% 
+  cpm(log = T) %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = everything(), 
+               names_to = "sample", values_to = "logCPM") %>% 
+  left_join(y$samples %>% 
+              mutate(sample = rownames(y$samples))) %>% 
+  ggplot(
+    aes(x = sample, y = logCPM)
+    ) +
+  geom_boxplot(
+    aes(fill = disease),
+    outlier.size = 0.5
+               ) +
+  facet_wrap(~cluster, scales = "free")
+  labs(title = "Distribution of logCPM values per sample",
+       x = "Sample", y = "log2 CPM")
+```
+
+
+# PCA
+## all samples
+```{r}
+pca = y$counts %>% 
+  cpm(log = TRUE) %>% 
+  t %>% 
+  prcomp 
+
+
+pca %>%   
+  autoplot(
+    data = tibble(
+      sample = rownames(.$x)
+    ) %>% 
+      left_join(y$samples %>% 
+                  mutate(sample = paste0(sample, "_cluster", cluster)
+                )
+                ),
+    colour = "cluster", 
+    shape = "disease",
+    alpha = 0.5,
+    size = 6
+  ) +
+  scale_color_viridis_d(option = "turbo")
+```
+
+## PCA by celltype
+```{r}
+plot.pca.bycelltype = function(dge.object, celltype.vector) {
+  
+  dge.object$counts %>% 
+  as.data.frame() %>% 
+  .[,grepl(colnames(y), pattern = celltype.vector)] %>% 
+  cpm(log = T) %>% 
+  t %>% 
+  prcomp %>% 
+  autoplot(
+    data = tibble(
+      sample = rownames(.$x)
+    ) %>% 
+      left_join(y$samples %>% 
+                  mutate(sample = paste0(sample, "_cluster", cluster)
+                )
+                ),
+    colour = "disease", 
+    shape = "sex",
+    alpha = 0.5,
+    size = 6
+  ) +
+  scale_color_manual(values = c("#5F676D", "#17BEBB", "#FE5448", "#A20C01")) +
+    ggtitle(celltype.vector)
+}
+
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Astrocyte1")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Astrocyte2")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Microglia2")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Microglia1")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Neuron_Ex1")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Neuron_Ex2")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Oligodendrocyte")
+```
+
+
+
+
+
+# DE analysis
+
+DE gene analysis was performed only on autosomal genes (to account for sex differences)
+```{r}
+# create a design matrix
+design <- model.matrix(~0 + disease_cluster, 
+                       data = y$samples %>% 
+                         droplevels()) 
+
+colnames(design) <- str_remove(colnames(design), 
+                               "geno_cluster")
+
+# extract out autosome genes
+autosomal.genes <- y$genes %>% 
+  left_join(hs_chrs %>% 
+              set_colnames(c("gene", "chr"))) %>% 
+  dplyr::filter(!chr %in% c("X", "Y")) %>% 
+  .$gene
+y <- y[autosomal.genes,]
+
+# estimae dispersion
+y <- estimateDisp(y, robust = TRUE)
+plotBCV(y)
+
+fit <- glmQLFit(y, design, robust = TRUE)
+plotQLDisp(fit)
+
+# Extract cell types shared by all diseases
+design_cols <- colnames(design)
+celltypes <- gsub("^disease_cluster(Control|DLB|PD|PDD)_", "", design_cols)
+shared_celltypes <- names(table(celltypes))[table(celltypes) == 4]
+
+# Build contrast strings: Control_celltype - DLB_celltype
+contrast_strings <- 
+  c(
+    paste0("disease_clusterDLB_", 
+           shared_celltypes, 
+           " - disease_clusterControl_", 
+           shared_celltypes
+           ), 
+    paste0("disease_clusterPD_", 
+         shared_celltypes, 
+         " - disease_clusterControl_", 
+         shared_celltypes
+         ), 
+    
+     paste0("disease_clusterPDD_", 
+         shared_celltypes, 
+         " - disease_clusterControl_", 
+         shared_celltypes
+         )
+  )
+    
+
+# Generate contrast matrix
+contrast_matrix <- makeContrasts(contrasts = contrast_strings, levels = design)
+
+# rename columns for readability
+colnames(contrast_matrix) <- gsub("disease_cluster", "", colnames(contrast_matrix))
+```
+
+## toptables
+```{r}
+toptables <- colnames(contrast_matrix) %>% 
+  sapply(function(x) {
+      glmQLFTest(fit, design, contrast=contrast_matrix[,x]) %>% 
+      topTags(n = Inf, sort.by = "PValue") %>% 
+      .$table %>% 
+      as_tibble %>% 
+      dplyr::select(
+        gene, logCPM, logFC, PValue, FDR, `F`
+      ) %>% 
+      mutate(
+        coef = x, 
+        DE = FDR < 0.05, 
+        coef = str_remove(coef, pattern = " - Control.+$")
+      )
+  }, simplify = F)
+
+```
+## volcano plots
+```{r}
+toptables %>%
+  bind_rows() -> volcano_data
+
+# Count number of DE up/down per celltype (coef)
+volcano_labels <- volcano_data %>%
+  dplyr::filter(DE) %>%
+  mutate(direction = ifelse(logFC > 0, "Up", "Down")) %>%
+  group_by(coef, direction) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(
+    x = ifelse(direction == "Up", 3, -3),  # approximate x positions
+    y = max(-log10(volcano_data$PValue), na.rm = TRUE) * 0.9,  # high y
+    label = paste0(direction, ": ", n)
+  )
+
+# Plot
+volcano_data %>% 
+  ggplot(
+    aes(x = logFC, y = -log10(PValue))
+    ) +
+  geom_point(
+    aes(colour = DE)
+    ) +
+  scale_color_manual(values = c("grey50", "red")) +
+  facet_wrap(~coef) +
+  geom_text(
+    data = volcano_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4,
+    hjust = 0.5
+  ) +
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(P value)"
+  ) 
+```
+
+Some of the volcano plots havce some weird arm shapes. This usually comes from insufficient filtering. So i re-ran the analysis, while increasing the filtering. 
+
+
+## MD plots
+These plots have a bunch of low expressed genes - the MD plots dont have a nice triangle shape. I think i need to increase the filtering. probs going to lose some celltypes. 
+
+```{r}
+toptables %>% 
+  bind_rows() %>% 
+  ggplot(
+    aes(x = logCPM, y = logFC)
+  ) +
+  geom_point(
+    aes(colour = DE ),
+    alpha = 0.5
+  ) +
+  facet_wrap(~coef) +
+  scale_color_manual(values = c("grey50", "red"))
+```
+
+This hasnt worked. 
+
+# enrichmenmt andlysis 
+## CD pathways
+```{r}
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster <- cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+
+network.genes.cluster %<>% 
+  lapply(function(x) {
+    x[x %in% rownames(y)]
+  })
+
+# only retain clusters if they have more than 2 genes
+network.genes.cluster <- 
+  network.genes.cluster[lapply(network.genes.cluster, length) > 2]
+  
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(path = "data/results/adultchildsubtypes", 
+             pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/overlapping_nodes_metadata.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes <- node_metadata$CD_1A_lyso_DLB
+```
+
+# how many network genes are DE?
+```{r}
+toptables[grepl(names(toptables), pattern = "DLB")] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    DE == T, 
+    gene %in% node_metadata$CD_1A_lyso_DLB$X
+    ) %>% 
+  dplyr::select(!starts_with("vf")) %>% 
+  ggplot(
+    aes(y = coef)
+  ) +
+  geom_bar() +
+  labs(
+    title = "Number of DE genes in DLB network"
+  ) +
+
+toptables[grepl(names(toptables), pattern = "PD")] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    DE == T, 
+    gene %in% node_metadata$CD_1A_lyso_PD$X
+    ) %>% 
+  dplyr::select(!starts_with("vf")) %>% 
+  ggplot(
+    aes(y = coef)
+  ) +
+  geom_bar() +
+  labs(
+    title = "Number of DE genes in PD network"
+  )
+
+```
+
+
+```{r}
+net.genes.DE <- toptables[grepl(names(toptables), pattern = "DLB")] %>% 
+  bind_rows() %>% 
+  dplyr::filter(DE == T) %>% 
+  dplyr::filter(gene %in% network.genes$X) %>% 
+  .$gene %>% unique
+
+toptables %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% net.genes.DE, 
+    grepl(coef, pattern = "DLB")
+    ) %>% 
+  tidyHeatmap::heatmap(
+    .row = gene, 
+    .column = coef, 
+    .value = logFC,
+    
+    palette_value = circlize::colorRamp2(
+      seq(-5, 5, length.out = 11), 
+      rev(RColorBrewer::brewer.pal(11, "RdBu"))
+    )
+  ) %>% 
+  layer_text(
+    FDR < 0.05, .value = "*"
+  )
+  
+y %>% 
+  cpm(log=T) %>% 
+  .[net.genes.DE,] %>% 
+  as.data.frame() %>% 
+  rownames_to_column("gene") %>% 
+  pivot_longer(
+    names_to = "sample_cluster", 
+    values_to = "logCPM", 
+    colnames(y)
+    ) %>% 
+  left_join(rownames_to_column(y$samples, 
+                               "sample_cluster")) %>% 
+  dplyr::filter(disease %in% c("Control", "DLB")) %>% 
+  ggplot(
+    aes(x = cluster, y = logCPM, fill = disease)
+  ) +
+  #geom_jitter() +
+  geom_boxplot() +
+  facet_wrap(~gene, scales = "free_y") +
+  easy_rotate_x_labels(angle = -45) +
+  theme(
+    text = element_text(size = 18) 
+    )
+
+```
+
+
+# Over representation analysis
+## ORA of KEGG pathways within clusters
+```{r}
+ORA.clusters <- network.genes.cluster %>% 
+  lapply(function(x) {
+    clusterProfiler::enrichKEGG(
+      gene = bitr(x, 
+                  OrgDb = org.Hs.eg.db,
+                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
+      keyType = "ncbi-geneid", 
+      organism = "hsa"
+    ) 
+    })
+```
+
+#### number of DE genes per cluster
+```{r}
+ora.DEG.in.clusters <- toptables %>%
+  lapply(function(x) {
+    genes <- x %>%
+      dplyr::filter(DE == TRUE) %>%
+      pull(gene)
+    
+    if (length(genes) < 5) return(NULL)  # skip if too few genes
+    
+    clusterProfiler::enricher(
+      gene = genes,
+      TERM2GENE = network.genes.cluster %>%
+        enframe(name = "TERM", value = "GENE") %>%
+        unnest(cols = "GENE"), 
+      universe = x$gene
+    )
+  }) %>%
+  purrr::compact() 
+
+ora.DEG.in.clusters %>% 
+  lapply(as_tibble) %>% 
+  bind_rows(.id = "comparison")
+
+keep = toptables %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% network.genes.cluster$C438
+  ) %>% 
+  dplyr::filter(DE == T) %>% 
+  .$gene
+
+  # Build the FDR matrix (for asterisk overlay)
+  FDR_mat <- toptables %>%
+    bind_rows() %>%
+    dplyr::filter(gene %in% network.genes$X) %>%
+    dplyr::select(coef, gene, FDR) %>%
+    pivot_wider(names_from = gene, values_from = FDR) %>%
+    column_to_rownames("coef") %>%
+    as.matrix()
+
+Heatmap(
+  matrix = toptables %>%
+    bind_rows() %>%
+    dplyr::filter(gene %in% network.genes$X) %>%
+    dplyr::select(coef, gene, logFC) %>%
+    pivot_wider(names_from = gene, values_from = logFC) %>%
+    column_to_rownames("coef") %>%
+    as.matrix(),
+  name = "logFC",
+  col = brewer_pal(palette = "RdBu")(7), 
+  
+  cell_fun =function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat[i, j]) && FDR_mat[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    },
+  column_names_gp = gpar(fontsize = 10),
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE
+)
+
+
+```
+
+
+
+```{r}
+#plot number of DE genes per cluster
+network.genes.cluster %>% 
+  lapply(function(x) {
+    tibble(
+      gene = x
+    ) %>% 
+      left_join(toptables %>% 
+                  bind_rows() %>% 
+                  dplyr::select(gene, coef, FDR) %>% 
+                  mutate(DE = FDR < 0.05), 
+                by = "gene"
+      )
+  }) %>% 
+  bind_rows(.id = "cluster") %>% 
+  dplyr::filter(DE == T) %>% 
+  mutate(
+    celltype = str_extract(
+      coef,
+      pattern = "(?<=DLB_).+(?= - Control_)")) %>% 
+ count(cluster, celltype, name = "num_DE_genes") %>%
+  ggplot(aes(x = cluster, y = num_DE_genes, fill = celltype)) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Number of DE genes (FDR < 0.05)",
+    x = "Network cluster",
+    y = "# DE genes"
+  ) +
+  scale_y_continuous(breaks = 0:12) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+```{r}
+plot.cnet = function(toptable, plot.title, ORA.cluster.object) {
+  # 1. Get toptable for the cluster you're plotting
+top.genes <- toptable %>%
+  # dplyr::filter(PValue < 0.05) %>% 
+  dplyr::select(gene, logFC)
+
+# 2. Map gene symbols to ENTREZID
+fc.entrez <- bitr(
+  top.genes$gene,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+) %>%
+  left_join(top.genes, by = c("SYMBOL" = "gene")) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE) %>%
+  dplyr::select(-SYMBOL) %>% 
+  deframe()  # named vector: names are ENTREZID, values are logFC
+
+cnetplot(
+  x = setReadable(ORA.cluster.object, 
+                  OrgDb = org.Hs.eg.db, keyType = "ENTREZID"),
+  foldChange = fc.entrez,
+  showCategory = 20,
+  circular = FALSE,
+  color_category='grey20', size_category = 0.5,
+  color_item = "grey90", 
+  colorEdge = F
+) +
+  scale_color_gradient2(name='logFC', low='blue4', high='firebrick4') + 
+  ggtitle(plot.title)
+  
+}
+```
+
+```{r}
+plot.cnet(
+  toptable = toptables$`DLB_astrocyte - Control_astrocyte`,
+  ORA.cluster.object = ORA.clusters$C453, 
+  plot.title = "Astrocytes")
+
+plot.cnet(
+  toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`,
+  ORA.cluster.object = ORA.clusters$C439, 
+  plot.title = "Microglia")
+
+plot.cnet(
+  toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`,
+  ORA.cluster.object = ORA.clusters$C448, 
+  plot.title = "Microglia")
+
+plot.cnet(
+  toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`,
+  ORA.cluster.object = ORA.clusters$C438, 
+  plot.title = "Microglia")
+```
+
+
+
+
+
+```{r}
+plot.cnet(
+  toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`,
+  ORA.cluster.object = ORA.clusters$C441, 
+  plot.title = "inhib neurons")
+
+plot.cnet(
+  toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`,
+  ORA.cluster.object = ORA.clusters$C440, 
+  plot.title = "inhib neurons")
+```
+
+## ORA of KEGG pathways
+```{r}
+ora.DEG.KEGG <- toptables %>%
+  lapply(function(x) {
+    genes <- x %>%
+      dplyr::filter(DE == TRUE) %>%
+      pull(gene)
+    
+    if (length(genes) < 5) return(NULL)  # skip if too few genes
+    
+    clusterProfiler::enrichKEGG(
+      gene = bitr(genes, 
+                  OrgDb = org.Hs.eg.db,
+                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
+      universe = bitr(x$gene, 
+                  OrgDb = org.Hs.eg.db,
+                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
+      keyType = "ncbi-geneid", 
+      organism = "hsa") 
+  }) %>%
+  purrr::compact() 
+```
+
+```{r}
+ora.DEG.KEGG %>%
+  lapply(as_tibble) %>% 
+  bind_rows(.id = "coef") %>% 
+  dplyr::filter(Count > 1) %>% 
+  ggplot(
+    aes(x = -log10(pvalue), y = Description)
+  ) + 
+  geom_col() +
+  facet_wrap(~coef, scales = "free_y")
+```
+
+
+
+### fry gene set tests
+#### Obtain KEGG gene sets
+```{r}
+library(KEGGREST)
+
+### obtain the pathway to entrez geneid link
+path2entrezgene  <- 
+  keggLink("pathway", "hsa") %>% 
+  tibble(
+    pathway = ., 
+    entrez_gene_id = sub("hsa:", "", names(.))
+    )
+
+# obtain the pathway names
+pathways <-
+  keggList("pathway", "hsa") %>%
+  tibble(pathway = names(.), description = .)
+
+# Use org.eg.db to obtain the conversion of entrez to gene symbol
+hsa_kegg_anno <- 
+  path2entrezgene %>%
+  mutate(
+    symbol = mapIds(org.Hs.eg.db , entrez_gene_id, 
+                    "SYMBOL", "ENTREZID")
+  ) %>% 
+  mutate(pathway = str_remove(pathway, pattern = "path:")) %>%
+  left_join(pathways) %>%
+  dplyr::select(-entrez_gene_id) %>% 
+  dplyr::filter(
+    symbol %in% (y$genes$gene)) %>%
+  mutate(
+    description = str_remove_all(description, pattern = " \\- Homo .+"))
+
+
+# make the KEGG object for gene set testing
+KEGG <- hsa_kegg_anno %>%
+  na.omit %>%
+  distinct(pathway, symbol, .keep_all = TRUE) %>%
+  split(f = .$description) %>%
+  lapply(function(x) {x$symbol %>% unname()})
+
+# only retain pathways with more than 3 genes
+KEGG <- KEGG[lapply(KEGG, length) > 3 ]
+
+```
+
+#### Run FRY on network clusters
+```{r}
+fry <- colnames(contrast_matrix) %>% 
+  sapply(function(x) {
+   cpm(y, log = T)  %>% 
+      fry(
+        index = network.genes.cluster,
+        design = design, 
+        contrast = contrast_matrix[,x], 
+        sort = "directional"
+      ) %>% 
+      rownames_to_column("pathway") %>% 
+      as_tibble() %>% 
+      mutate(coef = x) %>% 
+      left_join(
+        cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+          dplyr::select(pathway = Cluster, top.pathway.gprofiler = Top.pathway)
+      )
+  }, simplify = FALSE)
+```
+
+#### run FRY on KEGG pws
+```{r}
+fry.KEGG <- colnames(contrast_matrix) %>% 
+  sapply(function(x) {
+   cpm(y, log = T)  %>% 
+      fry(
+        index = KEGG,
+        design = design, 
+        contrast = contrast_matrix[,x], 
+        sort = "mixed"
+      ) %>% 
+      rownames_to_column("pathway") %>% 
+      as_tibble() %>% 
+      mutate(coef = x)
+      
+  }, simplify = FALSE)
+```
+
+```{r}
+fry.KEGG %>% 
+  bind_rows() %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>% 
+  ggplot(
+    aes(x = coef, y = pathway, fill = -log10(PValue.Mixed))
+  ) +
+  geom_tile() 
+  facet_wrap(~coef, scales = "free")
+```
+
+```{r}
+
+pw.interest = c("Lysosome", "Sphingolipid metabolism", "Other glycan degradation" , "Glycosaminoglycan degradation","Phagosome", "Ferroptosis", "Mineral absorption", "Antigen processing and presentation", "Cholesterol metabolism" , "Starch and sucrose metabolism", "Sphingolipid signaling pathway", "Rheumatoid arthritis", "Synaptic vesicle cycle", "Galactose metabolism", "Allograft rejection", "Carbohydrate digestion and absorption", "Tuberculosis", "Porphyrin metabolism", "Type I diabetes mellitus", "Graft-versus-host disease", "Protein processing in endoplasmic reticulum", "Amino sugar and nucleotide sugar metabolism", "Autoimmune thyroid disease", "Viral myocarditis", "PPAR signaling pathway", "Salivary secretion")
+
+fry.KEGG %>% 
+  bind_rows() %>% 
+  dplyr::filter(pathway %in% pw.interest) %>% 
+  ggplot(
+    aes(x = -log10(FDR), y = pathway,
+        fill = Direction,
+        alpha = FDR < 0.05)
+  ) +
+  geom_col() + 
+  facet_wrap(~coef, nrow = 1) +
+  theme(
+    legend.position = "top"
+  )
+
+```
+
+
+
+### vis 
+#### which clusters are sig
+```{r}
+fry %>% 
+  bind_rows() %>% 
+  pivot_longer(
+    cols = c(PValue, PValue.Mixed),
+    names_to = "pval_type",
+    values_to = "pval"
+  ) %>%
+  mutate(
+    coef = str_extract(coef, 
+                         pattern = "(?<=DLB_).+(?= - Control_)"),
+    neglog10_p = -log10(pval),
+    pval_type = recode(pval_type, "PValue" = "Directional", "PValue.Mixed" = "Mixed"),
+    fdr = case_when(
+      pval_type == "Directional" ~ FDR,
+      pval_type == "Mixed" ~ FDR.Mixed
+    ),
+    sig = fdr < 0.05,
+    alpha_val = if_else(sig, 1, 0.3),
+    pathway = factor(pathway, levels = unique(pathway))
+  ) %>% 
+  ggplot(aes(x = pval_type,
+             y = pathway, fill = neglog10_p, alpha = alpha_val)) +
+  geom_tile() +
+  facet_wrap(~coef, nrow = 1) +
+  scale_fill_viridis_c(option = "plasma", name = "-log10(P)") +
+  scale_alpha(range = c(0.3, 1), guide = "none") +
+  labs(
+    x = "Hypothesis test",
+    y = "Netcoloc cluster"
+  ) 
+```
+
+#### network
+##### netcoloc cluster 436
+```{r}
+plot.cnet(
+  toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`, 
+  ORA.cluster.object = ORA.clusters$C436, 
+  plot.title = "Cluster C436 in inhib neurons"
+  )
+
+plot.cnet(
+  toptable = toptables$`DLB_vascular - Control_vascular`, 
+  ORA.cluster.object = ORA.clusters$C436, 
+  plot.title = "Cluster C436 in vascular cells"
+  )
+
+
+```
+
+
+##### neurons
+```{r}
+# 1. Get toptable for the cluster you're plotting
+top.genes <- toptables$`DLB_neuron_inhib - Control_neuron_inhib` %>%
+  dplyr::select(gene, logFC)
+
+# 2. Map gene symbols to ENTREZID
+fc.entrez <- bitr(
+  top.genes$gene,
+  fromType = "SYMBOL",
+  toType = "ENTREZID",
+  OrgDb = org.Hs.eg.db
+) %>%
+  left_join(top.genes, by = c("SYMBOL" = "gene")) %>%
+  dplyr::distinct(ENTREZID, .keep_all = TRUE) %>%
+  dplyr::select(-SYMBOL) %>% 
+  deframe()  # named vector: names are ENTREZID, values are logFC
+
+cnetplot(
+  x = setReadable(ORA.clusters$C436, OrgDb = org.Hs.eg.db, keyType = "ENTREZID"),
+  foldChange = fc.entrez,
+  showCategory = 10,
+  circular = FALSE,
+  color_category='grey80', 
+  color_item = "grey90", 
+  colorEdge = TRUE
+) +
+  scale_color_gradient2(name='logFC', low='blue4', high='firebrick4') + 
+  ggtitle("Neuron network")
+```
+
+#### logCPM
+```{r}
+plot.logCPM = function(cluster.list, plot.title) {
+  
+    logcpm_mat <- y %>%
+    cpm(log = TRUE) %>%
+    .[cluster.list, , drop = FALSE]
+  
+    sample_meta <- y$samples[colnames(logcpm_mat), , drop = FALSE]
+    
+ Heatmap(
+    matrix = logcpm_mat,
+    name = "logCPM",
+    top_annotation = HeatmapAnnotation(
+      celltype = sample_meta$cluster %>% droplevels(),
+      disease = sample_meta$disease %>% droplevels(),
+      col = list(
+        disease = c("Control" = "grey10", "DLB" = "red"), 
+        celltype = viridis_pal(option = "turbo")(8) %>% 
+          set_names(sample_meta$cluster %>% unique)
+      )
+    ),
+    
+    col = viridis_pal()(10),
+    column_split = sample_meta$cluster,
+    column_title = plot.title,
+    show_column_names = F,
+    show_row_names = T,
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+  )
+}
+
+plot.logCPM(cluster.list = network.genes.cluster$C453, 
+            plot.title = "C501: lysosomal lumen")
+```
+
+#### logFC of DEGs
+```{r}
+
+keep = toptables %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% network.genes.cluster$C453
+  ) %>% 
+  dplyr::filter(DE == T) %>% 
+  .$gene
+
+  # Build the FDR matrix (for asterisk overlay)
+  FDR_mat <- toptables %>%
+    bind_rows() %>%
+    dplyr::filter(gene %in% net.genes.DE) %>%
+    dplyr::select(coef, gene, FDR) %>%
+    pivot_wider(names_from = gene, values_from = FDR) %>%
+    column_to_rownames("coef") %>%
+    as.matrix()
+
+Heatmap(
+  matrix = toptables %>%
+    bind_rows() %>%
+    dplyr::filter(gene %in% net.genes.DE) %>%
+    dplyr::select(coef, gene, logFC) %>%
+    pivot_wider(names_from = gene, values_from = logFC) %>%
+    column_to_rownames("coef") %>%
+    as.matrix(),
+  name = "logFC",
+  col = brewer_pal(palette = "RdBu")(7), 
+  
+  cell_fun =function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat[i, j]) && FDR_mat[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    },
+  column_names_gp = gpar(fontsize = 12),
+  show_row_names = TRUE,
+  show_column_names = TRUE,
+  cluster_rows = TRUE,
+  cluster_columns = TRUE
+)
+```
+
+
+```{r}
+toptables$`DLB_microglia_immune - Control_microglia_immune` %>%
+  dplyr::filter(gene %in% network.genes.cluster$C436) %>% 
+  # dplyr::filter(FDR < 0.05) %>% 
+  dplyr::select(
+    gene, logFC, PValue, FDR, coef
+  ) %>% 
+  left_join(network.genes %>% 
+              dplyr::select(gene = X, z_d2, z_both)) %>% 
+  ggplot(
+    aes(x = -log10(PValue), y = z_d2)
+  ) +
+  geom_point() +
+  geom_label_repel(
+    aes(label= gene), 
+    data = . %>% 
+      dplyr::filter(
+        FDR < 0.1 & z_both > 5
+      )
+  )
+
+toptables$`DLB_microglia_immune - Control_microglia_immune` %>%
+  dplyr::filter(gene %in% network.genes.cluster$C436) %>% 
+  # dplyr::filter(FDR < 0.05) %>% 
+  dplyr::select(
+    gene, logFC, PValue, FDR, coef
+  ) %>% 
+  left_join(network.genes %>% 
+              dplyr::select(gene = X, z_d2, z_both)) %>% 
+  ggplot(
+    aes(x = logFC, y = z_both, colour = -log10(PValue))
+  ) +
+  geom_point() +
+  geom_label_repel(
+    aes(label= gene), 
+    data = . %>% 
+      dplyr::filter(
+        FDR < 0.05 & z_both > 5
+      )
+  )
+```
+
+# data export
+```{r}
+
+
+y %>% 
+  qsave("data/public data/GSE178146_RAW/R_objects/pseudobulk_dgeObject.qs")
+
+ORA.clusters %>% 
+  qsave("data/public data/GSE178146_RAW/R_objects/ORA_clusters.qs")
+
+ora.DEG.in.clusters %>% 
+  qsave("data/public data/GSE178146_RAW/R_objects/ORA_DEGs_clusters.qs")
+
+fry %>% 
+  qsave("data/public data/GSE178146_RAW/R_objects/fry_results.qs")
+
+toptables %>% 
+  qsave("data/public data/GSE178146_RAW/R_objects/toptables.qs")
+```
+
+
+# figs
+
+## Which cell types are the network genes expressed in?
+```{r}
+network.genes <- node_metadata[
+  node_metadata %>% names %>% grepl(pattern = "CD_1A")
+] %>% 
+  lapply(function(x) {
+    tibble(
+      gene_name = x$X
+    )
+  }) %>% 
+  set_names(str_remove(names(.), pattern = "CD_1A_lyso_"))
+
+
+# violin plot to show the expression of network genes across celltypes
+plot.network.genes.across.celltypes = function(
+  network.genes, 
+  disease.object,
+  ggtitle
+  ){
+y %>% 
+  cpm(log = T) %>% 
+  as_tibble(rownames = "gene_name") %>% 
+  pivot_longer(
+    names_to = "sample_id", 
+    values_to = "logCPM", 
+    colnames(y)
+  ) %>% 
+  left_join(y$samples) %>% 
+  dplyr::filter(
+    gene_name %in% network.genes, 
+    disease %in% disease.object
+  ) %>% 
+  ggplot(
+    aes(y = logCPM, x = disease, colour = disease)
+  ) +
+  geom_violin() +
+  geom_boxplot(
+    width = 0.2, 
+    position = position_dodge(width = 1)
+  ) +
+  facet_wrap(~cluster, scales = "free_x", nrow = 1) +
+  labs(
+    title = ggtitle
+  ) +
+    theme(legend.position = "none")
+}
+
+ggarrange(
+plot.network.genes.across.celltypes(
+  network.genes = network.genes$DLB$gene_name,
+  disease.object = c("Control", "DLB"), 
+  ggtitle = "Expression of lysosomal childhood dementias & DLB subnetwork genes"
+) +
+  scale_color_manual(
+    values = viridis_pal(option = "magma", end = 0.8)(2)
+  ),
+plot.network.genes.across.celltypes(
+  network.genes = network.genes$PD$gene_name,
+  disease.object = c("Control", "PD", "PDD"), 
+  ggtitle = "Expression of lysosomal childhood dementias & PD subnetwork genes"
+  ) +
+  scale_color_manual(
+    values = viridis_pal(begin = 0.1, end = 0.5)(3)
+    ) , 
+
+ncol = 1
+)
+
+```
+
+
+```{r}
+ggplot(volcano_data, aes(x = logFC, y = -log10(PValue))) +
+  geom_point(aes(colour = DE)) +
+  scale_color_manual(values = c("grey50", "red")) +
+  facet_wrap(~coef) +
+  geom_text(
+    data = volcano_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4,
+    hjust = 0.5
+  ) +
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(P value)"
+  ) +
+  ggsave(
+    "output/DLB_snRNAseq/figs/talk/celltype_volcanoplots.png", 
+    width = 12, height = 8, units = "cm",
+    scale = 2.5)
+```
+```{r}
+network.genes.cluster %>% 
+  lapply(function(x) {
+    tibble(
+      gene = x
+    ) %>% 
+      left_join(toptables %>% 
+                  bind_rows() %>% 
+                  dplyr::select(gene, coef, FDR) %>% 
+                  mutate(DE = FDR < 0.05), 
+                by = "gene"
+      )
+  }) %>% 
+  bind_rows(.id = "cluster") %>% 
+  dplyr::filter(DE == T) %>% 
+  mutate(
+    celltype = str_extract(
+      coef,
+      pattern = "(?<=DLB_).+(?= - Control_)")) %>% 
+ count(cluster, celltype, name = "num_DE_genes") %>%
+  ggplot(aes(x = cluster, y = num_DE_genes, fill = celltype)) +
+  geom_col(position = "dodge", colour = "black") +
+  labs(
+    title = "Number of DE genes (FDR < 0.05)",
+    x = "Network cluster",
+    y = "# DE genes"
+  ) +
+  scale_y_continuous(breaks = 0:9) +
+  scale_fill_viridis_d() +
+  coord_flip() 
+  ggsave(
+    "output/DLB_snRNAseq/figs/talk/numDEGsperclusterpercelltype.png", 
+    width = 12, height = 8, units = "cm",
+    scale = 2.5)
+
+
+a <- network.genes.cluster %>% 
+  lapply(function(x) {
+    tibble(
+      gene = x
+    ) %>% 
+      left_join(toptables %>% 
+                  bind_rows() %>% 
+                  dplyr::select(gene, coef, FDR) %>% 
+                  mutate(DE = FDR < 0.05), 
+                by = "gene"
+      )
+  }) %>% 
+  bind_rows(.id = "cluster") %>% 
+  dplyr::filter(DE == T) %>% 
+  mutate(
+    celltype = str_extract(
+      coef,
+      pattern = "(?<=DLB_).+(?= - Control_)")) %>% 
+ count(cluster, celltype, name = "num_DE_genes") %>%
+  ggplot(aes(x = cluster, y = num_DE_genes, fill = celltype)) +
+  geom_col(position = "dodge", colour = "black") +
+  labs(
+    title = "Number of DE genes (FDR < 0.05)",
+    x = "Network cluster",
+    y = "# DE genes"
+  ) +
+  scale_y_continuous(breaks = 0:9) +
+  scale_fill_viridis_d() +
+  coord_flip() +
+   theme(legend.position = "bottom")
+
+b <- fry %>% 
+  bind_rows() %>% 
+   mutate(
+    coef = str_extract(coef, 
+      pattern = "(?<=DLB_).+(?= - Control_)"
+    )) %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>% 
+  ggplot(
+    aes(y = pathway, x = -log10(PValue.Mixed), fill = Direction)
+  ) +
+  geom_col() +
+  facet_wrap(~coef, scales = "free_y") +
+  labs(
+    y = "Cluster from network", 
+    title = "Ranked-list gene set testing (limma::fry)"
+  ) +
+  theme(legend.position = "bottom")
+
+a + b +
+  plot_layout(
+    widths = c(1,2),
+    heights = c(1,2)
+    ) +
+  
+ggsave(
+    "output/DLB_snRNAseq/figs/talk/numDEGsperclusterpercelltype.png", 
+    width = 12, height = 8, units = "cm",
+    scale = 2.5)
+```
+
+
+
+
+
+
+
+
+
+

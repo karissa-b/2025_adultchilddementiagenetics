@@ -24,6 +24,7 @@ library(ComplexUpset)
 library(UpSetR)
 library(pander)
 library(ggeasy)
+library(ggfortify)
 library(ggpubr)
 library(ggrepel)
 library(plotly)
@@ -40,6 +41,7 @@ library(ndexr)
 
 # enrichemnt
 library(clusterProfiler)
+library(gprofiler2)
 library(ReactomePA)
 
 theme_set(theme_light() +
@@ -54,7 +56,31 @@ knitr::opts_chunk$set(
 )
 ```
 
-# import gene sets
+# import 
+## nodes
+
+```{r}
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(
+    path = "data/results/adultchildsubtypes", 
+    pattern = "overlapping_nodes_metadata", 
+    recursive = TRUE, full.names = TRUE
+  ) %>% 
+  set_names(
+    str_replace(
+      ., 
+      pattern = "/overlapping_nodes_metadata.csv",
+      replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+```
+## gene sets
 
 ```{r}
 genesets <- list.files(
@@ -85,8 +111,13 @@ genesets %>%
   rownames_to_column("geneset") %>%
   set_colnames(c("geneset", "gene")) %>% 
   mutate(
-   geneset = str_remove(geneset, pattern = "\\d{1,3}$"), 
-    geneset = fct_infreq(geneset)  # Reorder by frequency
+    geneset = str_remove(geneset, pattern = "\\d{1,3}$"), 
+    geneset = fct_infreq(geneset), # Reorder by frequency, 
+    type = case_when(
+      grepl(geneset, pattern = "^CD") ~ "childhood", 
+      TRUE ~ "adult"
+    )
+   
    ) %>% 
   ggplot(
     aes(x = geneset)
@@ -96,6 +127,10 @@ genesets %>%
   labs(
     title = "Number of genes per gene set", 
     y = "# genes"
+  ) +
+  facet_wrap(~type, nrow = 2, scales = "free_x", space = "free_x") +
+  theme(
+    plot.margin = margin(r = 2, unit = "cm")
   )
 ```
 
@@ -135,42 +170,42 @@ the background gene set will be all genes found in the PCNet, as these are the o
 nodes <- readRDS("data/R_objects/network/nodes.rds")
 ```
 
-## GO terms
+<!-- ## GO terms -->
 
-Here, i performed over-represetation analysis (hypergeometric test) of GO terms (all ontologies) of each gene set using clusterprofiler
+<!-- Here, i performed over-represetation analysis (hypergeometric test) of GO terms (all ontologies) of each gene set using clusterprofiler -->
 
-```{r}
-runGO = function(geneset) {
-  enrichGO(
-    gene = geneset, 
-    universe = nodes, 
-    OrgDb = org.Hs.eg.db, 
-    keyType = "SYMBOL", 
-    ont = "ALL"
-  )
-}
-```
+<!-- ```{r} -->
+<!-- runGO = function(geneset) { -->
+<!--   enrichGO( -->
+<!--     gene = geneset,  -->
+<!--     universe = nodes,  -->
+<!--     OrgDb = org.Hs.eg.db,  -->
+<!--     keyType = "SYMBOL",  -->
+<!--     ont = "ALL" -->
+<!--   ) -->
+<!-- } -->
+<!-- ``` -->
 
-```{r}
-GO <- genesets %>% 
-  sapply(runGO, simplify = F) %>% 
-  sapply(as_tibble, simplify = F)
+<!-- ```{r} -->
+<!-- GO <- genesets %>%  -->
+<!--   sapply(runGO, simplify = F) %>%  -->
+<!--   sapply(as_tibble, simplify = F) -->
 
-GO %>% 
-  lapply(function(x) {
-    x$Description
-  }) %>% 
-  fromList() %>% 
-  UpSetR::upset(
-    nsets = length(.), 
-    order.by = "freq"
-  )
+<!-- GO %>%  -->
+<!--   lapply(function(x) { -->
+<!--     x$Description -->
+<!--   }) %>%  -->
+<!--   fromList() %>%  -->
+<!--   UpSetR::upset( -->
+<!--     nsets = length(.),  -->
+<!--     order.by = "freq" -->
+<!--   ) -->
 
-GO.terms.pergeneset <- GO %>% 
-  lapply(function(x) {
-    x$Description
-  }) 
-```
+<!-- GO.terms.pergeneset <- GO %>%  -->
+<!--   lapply(function(x) { -->
+<!--     x$Description -->
+<!--   })  -->
+<!-- ``` -->
 
 ## KEGG pathways
 
@@ -206,38 +241,38 @@ kegg %>%
 ```
 
 
-## reactome pathways 
-```{r}
-runReactome = function(geneset, genesetname) {
-  
-  enrichPathway(
-    gene = bitr(geneset, 
-                fromType = "SYMBOL", toType = "ENTREZID", 
-                OrgDb ="org.Hs.eg.db") %>% 
-      .$ENTREZID,
-    universe = bitr(nodes,
-                    fromType = "SYMBOL", toType = "ENTREZID",
-                    OrgDb= "org.Hs.eg.db") %>% 
-      .$ENTREZID, # all genes in pcnet
-    readable = TRUE, 
-    pvalueCutoff = 0.05
-  ) %>% 
-  as_tibble 
-}
+<!-- ## reactome pathways  -->
+<!-- ```{r} -->
+<!-- runReactome = function(geneset, genesetname) { -->
 
-# perform hypergeometic test for significant overrep of Reactome db
-reactome <- 
-  genesets %>% 
-  sapply(runReactome, "reactome", simplify = F)
+<!--   enrichPathway( -->
+<!--     gene = bitr(geneset,  -->
+<!--                 fromType = "SYMBOL", toType = "ENTREZID",  -->
+<!--                 OrgDb ="org.Hs.eg.db") %>%  -->
+<!--       .$ENTREZID, -->
+<!--     universe = bitr(nodes, -->
+<!--                     fromType = "SYMBOL", toType = "ENTREZID", -->
+<!--                     OrgDb= "org.Hs.eg.db") %>%  -->
+<!--       .$ENTREZID, # all genes in pcnet -->
+<!--     readable = TRUE,  -->
+<!--     pvalueCutoff = 0.05 -->
+<!--   ) %>%  -->
+<!--   as_tibble  -->
+<!-- } -->
 
-reactome %>% 
-  lapply(function(x) {x$Description}) %>% 
-  fromList() %>% 
-  UpSetR::upset(
-    order.by = "freq", 
-    nsets = length(.)
-  )
-```
+<!-- # perform hypergeometic test for significant overrep of Reactome db -->
+<!-- reactome <-  -->
+<!--   genesets %>%  -->
+<!--   sapply(runReactome, "reactome", simplify = F) -->
+
+<!-- reactome %>%  -->
+<!--   lapply(function(x) {x$Description}) %>%  -->
+<!--   fromList() %>%  -->
+<!--   UpSetR::upset( -->
+<!--     order.by = "freq",  -->
+<!--     nsets = length(.) -->
+<!--   ) -->
+<!-- ``` -->
 
 # Is there significant colocalisation?
 
@@ -277,40 +312,6 @@ enrichment_dfs <-
   )
 ```
 
-## plot observed v expected per comparison
-```{r}
-enrichment_dfs %>% 
-  ggplot(
-    aes(x = type, y = value, fill = type)
-    ) +
-  geom_bar(stat = "identity", position = "dodge", width = 0.6) +
-  geom_errorbar(
-    data = . %>% 
-      dplyr::filter(type == "expected"),
-    aes(ymin = value - 2 * expected_overlap_std,
-        ymax = value + 2 * expected_overlap_std),
-    width = 0.25
-  ) +
-  geom_label(
-    data =  . %>% 
-      dplyr::filter(type == "expected"),
-    aes(x = 1.5, y = 10, 
-        label = sprintf("p = %.2e", empirical_p)),
-    inherit.aes = FALSE,
-    vjust = 0,
-    hjust = 0.5,
-    fontface = "bold",
-    show.legend = FALSE
-  ) +
-  labs(
-    y = "Number of genes", 
-    x = ""
-  ) +
-  facet_wrap(~comparison, scales = "free_x") +
-  theme(legend.position = "none") +
-  scale_fill_manual(values = c("grey50", "skyblue"))
-```
-
 ## plot observed v expected ratio
 
 ```{r}
@@ -318,13 +319,26 @@ enrichment_dfs %>%
   bind_rows() %>% 
   as_tibble %>% 
   dplyr::filter(z_comb == 3, z_12 == 1.5) %>% 
-  mutate(
+ mutate(
     # use the childhood vector to extract the CD seed gene name
     CD = purrr::map_chr(comparison, ~ {
       match <- childhood[startsWith(.x, childhood)]
       if (length(match) > 0) match[1] else NA_character_
     }),
-
+    CD = case_when(
+      grepl(CD, pattern = "1A") ~ "Lysosomal disorders", 
+      grepl(CD, pattern = "1B") ~ "Other disorders of lipid metabolism & transport", 
+      grepl(CD, pattern = "1C") ~ "Disorders of amino acid & other organic acid metabolism", 
+      grepl(CD, pattern = "1D") ~ "Vitamin-responsive inborn errors of metabolism", 
+      grepl(CD, pattern = "1E") ~ "Disorders of mineral absorption & transport", 
+      grepl(CD, pattern = "1F") ~ "Peroxisomal diseases", 
+      grepl(CD, pattern = "1G") ~ "Mitochondrial disorders", 
+      grepl(CD, pattern = "1H") ~ "Other inborn errors of metabolism", 
+      grepl(CD, pattern = "2_") ~ "Leukodystrophies not notherwise categorised", 
+      grepl(CD, pattern = "3_") ~ "Neurodegeneration with brain iron accumulation", 
+      grepl(CD, pattern = "4_") ~ "Diseases not otherwise categorised"
+    ) %>% 
+      str_wrap(width = 22),
     adult = str_remove(comparison, pattern = "CD_.+_.+_"),
     adult = case_when(
       adult == "malform" ~ "brain_malform", 
@@ -341,14 +355,18 @@ enrichment_dfs %>%
     aes(fill = -log10(FDR), alpha = FDR < 0.05), 
     colour = "grey50"
   ) +
-  scale_fill_viridis_c() +
+  scale_fill_viridis_c(option = "magma") +
   scale_alpha_manual(values = c(0.1, 1)) +
   labs(
     x = "observed / expected", 
-    y = "adult-onset NDD", 
-    title = "pairwise contrasts between CD & adult-onset NDD"
+    y = "Disease"
   ) +
-  facet_wrap(~CD)
+  facet_wrap(~CD, ncol = 3) 
+  # ggsave(
+  #   "output/figs/paper/figure2.svg", 
+  #   width = 14, height = 12, units = "cm", scale = 1.5
+  #   
+  # )
 ```
 
 # Are the subnetworks biologically meaningful?
@@ -363,6 +381,24 @@ sig.networks <- enrichment_dfs %>%
   mutate(
     FDR = p.adjust(empirical_p, "fdr")
   ) %>% 
+  dplyr::filter(FDR < 0.05) %>% 
+  .$comparison %>% 
+  unique
+
+top.sig.networks <- 
+  enrichment_dfs %>% 
+  bind_rows() %>% 
+  as_tibble %>% 
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>% 
+  mutate(
+    CD = purrr::map_chr(comparison, ~ {
+      match <- childhood[startsWith(.x, childhood)]
+      if (length(match) > 0) match[1] else NA_character_
+    }),
+    FDR = p.adjust(empirical_p, "fdr")
+  ) %>% 
+  group_by(CD) %>% 
+  slice_max(order_by = obs_exp, n = 1) %>%
   dplyr::filter(FDR < 0.05) %>% 
   .$comparison %>% 
   unique
@@ -441,7 +477,9 @@ plot.mouse.variant.subtype.forestplot.by.CD.subtype <- function(data, CD_subtype
       size = "# Genes in MPO term",
       color = "Term Type"
     ) +
-  facet_wrap(~comparison, scales = "free")
+  facet_wrap(~comparison, nrow = 1
+             #scales = "free"
+             )
 }
 
 mouse.variants.plots <- childhood %>% 
@@ -466,24 +504,6 @@ mouse.variants.plots[8]
 I next want to see whether the genes in the subnetwork are expressed in the brain. To do this, I will assess it in the GTEx dataset. I will use the GTEx v10 data, which is the most recent version. 
 
 ```{r}
-### obtain the genes in the subnetworks
-node_metadata <- 
-  list.files(path = "data/results/adultchildsubtypes", 
-             pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
-  set_names(
-    str_replace(., 
-                pattern = "/overlapping_nodes_metadata.csv",
-                replacement = ""
-    ) %>% 
-      str_remove(
-        pattern = paste0("data/results/adultchildsubtypes", "/")
-      )
-  ) %>%   
-  map(read.csv) %>%
-  imap(~ mutate(.x, comparison = .y))
-```
-
-```{r}
 # plot number of genes per subnetworks
 node_metadata %>% 
   bind_rows() %>% 
@@ -493,9 +513,9 @@ node_metadata %>%
   mutate(
     seed_type = case_when(
       d1_seeds == 1 & d2_seeds == 1 ~ "both",
-      d1_seeds == 1 & d2_seeds == 0 ~ "D1",
-      d1_seeds == 0 & d2_seeds == 1 ~ "D2",
-      d1_seeds == 0 & d2_seeds == 0 ~ "network.proximal"
+      d1_seeds == 1 & d2_seeds == 0 ~ "D1 - childhood",
+      d1_seeds == 0 & d2_seeds == 1 ~ "D2 - adult",
+      d1_seeds == 0 & d2_seeds == 0 ~ "network proximal"
     )
   ) %>% 
   ggplot(
@@ -511,6 +531,38 @@ node_metadata %>%
     title = "Number of genes in the subnetworks"
   ) 
 ```
+
+## assessing which genes are driving the DLB/Lyso
+about half of the DLB_lyso gene set is unique to that comparsion
+```{r}
+list(
+  DLB_lyso_genes = node_metadata$CD_1A_lyso_DLB$X, 
+  AD_lyso_genes = node_metadata$CD_1A_lyso_AD$X,
+  PD_lyso_genes = node_metadata$CD_1A_lyso_PD$X,
+  ALS_lyso_genes = node_metadata$CD_1A_lyso_ALS$X,
+  FTLD_lyso_genes = node_metadata$CD_1A_lyso_FTLD$X) %>% 
+  fromList() %>% 
+  upset()
+```
+
+```{r}
+# what genes are the unique ones
+unique_genes <- node_metadata$CD_1A_lyso_DLB %>% 
+  dplyr::filter(!(X %in% node_metadata$CD_1A_lyso_AD$X)) %>% 
+  dplyr::filter(!(X %in% node_metadata$CD_1A_lyso_PD$X)) %>% 
+  dplyr::filter(!(X %in% node_metadata$CD_1A_lyso_ALS$X)) %>% 
+  dplyr::filter(!(X %in% node_metadata$CD_1A_lyso_FTLD$X)) %>% 
+  .$X
+
+node_metadata$CD_1A_lyso_DLB %>% 
+  dplyr::filter(X %in% unique_genes) %>% 
+  .$X %>% 
+  enrichGO(OrgDb = org.Hs.eg.db, keyType = "SYMBOL") %>% 
+  as_tibble 
+```
+
+
+
 
 ### obtain GTEx expression data
 This file was downloaded from here :
@@ -585,8 +637,113 @@ node_metadata %>%
   annotation_tile(CD)
 ```
 
+## what cell types are they primarily expressed in human brains?
+
+I have requested access for a human snRNAseq dataset from ROSMAP [Mathys et al.](https://www.nature.com/articles/s41586-024-07606-7) synapse ID 	
+[syn52293442](https://www.synapse.org/Synapse:syn52293442)
+
+Also getting a dementia with lewy body dataset from GEO: 
+https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE178146
+https://pmc.ncbi.nlm.nih.gov/articles/PMC8357687/
+
+A LSD dataset: NPC1 single cell mouse brain:
+sra: PRJNA606815
+https://pmc.ncbi.nlm.nih.gov/articles/PMC7432835/
+only n = 2 tho
+
+
+
 # what pathways are in the subnetwork
 
+To interrogate the biological context of the sub networks, I will perform some enrichment analyses. I will tackle this using two approaches: 
+
+1- Perform hypergeometric tests using KEGG pathways on the entire subnetwork (background is the list of genes in PCNet)
+2- use the annotations of the clusters within the subnetworks (performed using gprofiler) of KEGG, Reactome and GO terms. 
+
+## 1- whole subnetowrks
+```{r}
+enrichment.wholesubnet.kegg <- 
+  node_metadata[sig.networks] %>% 
+  lapply(magrittr::extract2, "X") %>% 
+  sapply(runKEGG, simplify = F)
+
+enrichment.wholesubnet.kegg %>% 
+  lapply(function(x) {
+    x$Description
+  }) %>% 
+  fromList() %>% 
+  UpSetR::upset(
+    nsets = length(.), 
+    order.by = "freq"
+  )
+```
+
+
+### using gprofiler
+```{r}
+# this was provided by William
+# the latest canonical set from MSigDB
+upload_GMT_file(gmtfile = "data/genesets/c2.cp.v2025.1.Hs.symbols.gmt")
+
+gprofiler.wholenet.genesetsv1 <- node_metadata[sig.networks] %>% 
+  lapply(magrittr::extract2, "X") %>% 
+  sapply(function(x) {
+    gost(query = x, 
+         organism = "gp__XoLn_Cg43_BEg", 
+         ordered_query = FALSE, 
+         significant = TRUE, # only return sig results
+         user_threshold = 0.05,
+         correction_method = "fdr",
+         domain_scope = "annotated", # only analyse genes with the annotation. 
+         evcodes = TRUE,
+         custom_bg = nodes) %>% 
+      .$result %>% 
+      as_tibble
+  }, simplify = F)
+
+gprofiler.wholenet.genesetsv1 %>% 
+  imap(~ mutate(.x, comparison = .y)) %>% 
+    bind_rows() %>% 
+  group_by(term_id) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n)
+
+gprofiler.wholenet.genesetsv1 %>% 
+  lapply(extract2, "term_id") %>% 
+  fromList %>% 
+  upset(
+    nsets = length(.), 
+    order.by = "freq", 
+    mb.ratio = c(0.5,0.5)
+  )
+
+gprofiler.wholenet.genesetsv1[
+  grepl(names(gprofiler.wholenet.genesetsv1), pattern = "lyso")
+  ] %>% 
+  lapply(function(x) {
+    x$term_name
+  }) %>%
+  fromList %>% 
+  upset(
+    nsets = length(.), 
+    order.by = "freq", 
+    mb.ratio = c(0.5,0.5)
+  )
+```
+
+```{r}
+gprofiler.wholenet.genesetsv1[
+  grepl(names(gprofiler.wholenet.genesetsv1), pattern = "lyso")
+  ] %>% 
+  sapply(extract2, "term_id", simplify = F) %>% 
+  ggVennDiagram::ggVennDiagram(force_upset = T)
+  
+```
+
+
+
+
+## 2- cluster annotations
 I will here show the top pathways identified in the clusters within the subnetworks. 
 
 ```{r}
@@ -608,6 +765,9 @@ cluster.gprofiler.results <-
 # only keep the signigicant subnets
 cluster.gprofiler.results <- cluster.gprofiler.results[sig.networks]
 ```
+
+
+
 
 ```{r}
 cluster.gprofiler.results %>% 
@@ -649,7 +809,7 @@ plot_top_pathways_for_CD <- function(cluster_results, CD_subtype, top_n = 10) {
             if (length(match) > 0) match[1] else NA_character_
           })
         ) %>%
-        filter(!is.na(p_value), CD == CD_subtype) %>%
+        dplyr::filter(!is.na(p_value), CD == CD_subtype) %>%
         group_by(comparison) %>%
         slice_min(order_by = p_value, n = top_n) %>%
         ungroup() %>%
@@ -657,7 +817,9 @@ plot_top_pathways_for_CD <- function(cluster_results, CD_subtype, top_n = 10) {
         mutate(Top.pathway = str_wrap(Top.pathway, width = 30))
     }) %>%
     bind_rows() %>%
-      mutate(Top.pathway = reorder_within(Top.pathway, -FDR, comparison)) %>%
+      mutate(
+        Top.pathway = reorder_within(Top.pathway, -FDR, comparison)
+        ) %>%
     ggplot(aes(
       x = -log10(FDR),
       y = reorder(Top.pathway, -FDR)
@@ -668,7 +830,7 @@ plot_top_pathways_for_CD <- function(cluster_results, CD_subtype, top_n = 10) {
     labs(
       x = "-log10(FDR)",
       y = NULL,
-      title = paste0("Top ", top_n, " Pathways for ", CD_subtype)
+      #title = paste0("Top ", top_n, " Pathways for ", CD_subtype)
     ) +
     theme(strip.text = element_text(face = "bold"))
 }
@@ -677,12 +839,41 @@ plots_list <- lapply(childhood, function(cd) {
   plot_top_pathways_for_CD(cluster.gprofiler.results, CD_subtype = cd)
 })
 
-names(plots_list) <- childhood
 
 for (p in plots_list) {
   print(p)
 }
+
+plots_list[1]
+plots_list[2]
+plots_list[3]
+plots_list[4]
+plots_list[5]
+plots_list[6]
+plots_list[7]
+plots_list[8]
+plots_list[9]
+plots_list[10]
+plots_list[11]
 ```
+
+```{r}
+plots_list2 <- lapply(childhood, function(cd) {
+  plot_top_pathways_for_CD(cluster.gprofiler.results[top.sig.networks], CD_subtype = cd)
+})
+
+ggarrange(plotlist = plots_list2)
+```
+
+```{r}
+cluster.gprofiler.results[top.sig.networks] %>% 
+  bind_rows() %>% 
+  group_by(  Top.pathway) %>% 
+  summarise(n = n()) %>% 
+  arrange(-n) %>% view
+```
+
+
 
 # what genes are in the subnetworks which are drug targetable?
 
@@ -702,7 +893,7 @@ gene.proximitiy.scores <- node_metadata %>%
 
 omicsynth <- read.csv("data/omicsynth/drug_genome_dgidb.csv") 
 
-gene.proximitiy.scores %>% 
+temp <- gene.proximitiy.scores %>% 
   lapply(function(x) {
     omicsynth %>% # has the drug info 
       # only reatin genes in subnet
@@ -718,21 +909,10 @@ gene.proximitiy.scores %>%
     }), 
     .after = comparison
   ) %>% 
-  dplyr::filter(comparison %in% sig.networks) %>% 
-  ggplot(
-    aes(x = interaction_group_score, y = z_both)
-  ) +
-  geom_point() +
-  geom_label_repel(
-    aes(label = drug_claim_name), 
-    data = . %>% 
-      dplyr::filter(z_both > 5 & interaction_group_score > 5)
-  ) +
-  labs(
-    x = "Interaction group score", 
-    y = "Network proximity z score"
-  ) + 
-  facet_wrap(~comparison, scales = "free")
+  dplyr::filter(comparison %in% sig.networks) 
+
+temp %>% 
+  dplyr::filter( comparison == "CD_1A_lyso_AD")
 
 plot_drug_vs_proximity_by_CD <- function(gene_proximity_list, omicsynth, CD_subtype, sig.networks, childhood) {
   gene_proximity_list %>% 
@@ -777,15 +957,679 @@ for (cd in childhood) {
 }
 ```
 
+# LSDs and adult onset
+## heatmap of z scores
+note i converted NA to 0
+
+```{r}
+library(RColorBrewer)
+library(pheatmap)
+# heatmap on the genes in the subnetworks
+node_metadata[grepl(names(node_metadata), pattern = "CD_1A")] %>% 
+  bind_rows(.id = "comparison") %>% 
+  dplyr::filter(comparison != "CD_1A_lyso_brain_malform") %>% 
+  dplyr::rename(gene = X) %>% 
+  as_tibble() %>%
+  dplyr::select(comparison, gene, z_both) %>% 
+  pivot_wider(values_from = z_both, names_from = comparison) %>% 
+  column_to_rownames("gene") %>% 
+  # set NA values to 0
+  mutate(across(everything(), ~ replace_na(., 0))) %>% 
+  as.matrix() %>% 
+  pheatmap(
+    color = colorRampPalette(rev(viridis_pal(option = "turbo")(100)))(100),
+  )
+```
+
+## PCA
+
+The z-scores of the genes are quite different 
+```{r}
+node_metadata[grepl(names(node_metadata), pattern = "CD_1A")] %>% 
+  bind_rows(.id = "comparison") %>% 
+  dplyr::filter(comparison != "CD_1A_lyso_brain_malform") %>% 
+  dplyr::rename(gene = X) %>% 
+  as_tibble() %>%
+  dplyr::select(comparison, gene, z_both) %>% 
+  pivot_wider(values_from = z_both, names_from = comparison) %>% 
+  column_to_rownames("gene") %>% 
+  # set NA values to 0
+  mutate(across(everything(), ~ replace_na(., 0)))  %>% 
+  t %>% 
+  prcomp %>% 
+  autoplot(
+    data = tibble(
+      comparison = rownames(.$x)
+    ),
+    alpha = 0.5,
+    size = 6
+  ) +
+  geom_label_repel(
+    aes(label = comparison)
+  )
+```
 
 
+DLB has a unique lysosomal disease overlap, potentially suggesting stronger involvement of lysosomal pathways than in AD/FTLD/ALS.
+
+CD_1A_lyso_PD is in the bottom-left, far from DLB and the AD/FTLD/ALS group. Suggests its LSD colocalization profile is distinct from DLB, despite both being synucleinopathies.
+
+What genes are driving this?
+
+```{r}
+node_metadata[grepl(names(node_metadata), pattern = "CD_1A")] %>% 
+  bind_rows(.id = "comparison") %>% 
+  dplyr::filter(comparison %in% c("CD_1A_lyso_AD", "CD_1A_lyso_DLB")) %>% 
+  dplyr::rename(gene = X) %>% 
+  as_tibble() %>% 
+  dplyr::select(gene, comparison, d2_name, d1_seeds, d2_seeds, z_both) %>% 
+  arrange(z_both) %>% 
+  mutate(
+    AD_lyso_seed_both = case_when(
+      comparison == "CD_1A_lyso_AD" & d1_seeds == 1 & d2_seeds == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    AD_lyso_seed_AD = case_when(
+      comparison == "CD_1A_lyso_AD" & d1_seeds == 0 & d2_seeds == 1 ~ 1,
+      TRUE ~ 0),
+    
+    AD_lyso_seed_lyso = case_when(
+      comparison == "CD_1A_lyso_AD" & d1_seeds == 1 & d2_seeds == 0 ~ 1,
+      TRUE ~ 0),
+    AD_lyso_noseed = case_when(
+      comparison == "CD_1A_lyso_AD" & d1_seeds == 0 & d2_seeds == 0 ~ 1,
+      TRUE ~ 0),
+    
+    DLB_lyso_seed_both = case_when(
+      comparison == "CD_1A_lyso_DLB" & d1_seeds == 1 & d2_seeds == 1 ~ 1,
+      TRUE ~ 0
+    ),
+    DLB_lyso_seed_AD = case_when(
+      comparison == "CD_1A_lyso_DLB" & d1_seeds == 0 & d2_seeds == 1 ~ 1,
+      TRUE ~ 0),
+    
+    DLB_lyso_seed_lyso = case_when(
+      comparison == "CD_1A_lyso_DLB" & d1_seeds == 1 & d2_seeds == 0 ~ 1,
+      TRUE ~ 0),
+    
+    DLB_lyso_noseed = case_when(
+      comparison == "CD_1A_lyso_DLB" & d1_seeds == 0 & d2_seeds == 0 ~ 1,
+      TRUE ~ 0)
+  ) %>% 
+  dplyr::select(shared_name = gene, everything()) 
+  #write.csv("output/adult child subtypes/lyso_AD_DLB_genes.csv")
+```
+
+```{r}
+
+temp <- runKEGG(geneset = node_metadata$CD_1A_lyso_DLB$X)
+
+temp %>% 
+  dplyr::filter(Count > 5) %>% .$Description
+  ggplot(
+    aes(
+      x = -log10(p.adjust), 
+      y = reorder(Description, -pvalue),
+      fill = Count)
+  ) +
+  geom_col() +
+  scale_fill_viridis_c() +
+  labs(
+    y = "KEGG pathway", 
+    fill = "Number of genes"
+  ) 
+  ggsave(
+    "output/adult child subtypes/figs/talk/overrep_KEGG.svg", 
+    width = 10, height = 5,
+    scale = 0.8
+    )
+  
+```
+
+# New genesets
+
+Netcoloc was performed on new genesets identified by William. below shows the expected vs observed ratio of the genes identified by dual network propogation. 
+
+## number of genes per geneset
+```{r}
+genesets_v2 <- 
+  list.files("data/genesets/Alternate_gene_lists_for_NetColoc_senstivity_analyses", 
+             full.names = T, pattern = "_.*txt") %>% 
+  sapply(function(x) {
+    x %>% 
+      read.delim() %>% 
+      .$Gene
+  }, simplify = F) %>% 
+  set_names(
+    str_replace(
+      list.files("data/genesets/Alternate_gene_lists_for_NetColoc_senstivity_analyses", 
+                 full.names = F, pattern = "_.*txt"), 
+      pattern = ".txt", 
+      replacement = ""
+    )
+  ) %>% 
+  set_names(
+    str_remove(names(.), pattern = "_v2_list")
+  )
+
+genesets %>% 
+  unlist %>% 
+  as.data.frame(col.names = "gene") %>% 
+  rownames_to_column("geneset") %>%
+  set_colnames(c("geneset", "gene")) %>% 
+  mutate(
+    geneset = str_remove(geneset, pattern = "\\d{1,3}$"), 
+    type = case_when(
+      grepl(geneset, pattern = "^CD") ~ "childhood", 
+      TRUE ~ "adult"
+    )
+   ) %>% 
+  dplyr::filter(type == "childhood") %>% 
+  bind_rows(
+    genesets_v2 %>% 
+      unlist %>% 
+      as.data.frame(col.names = "gene") %>% 
+      rownames_to_column("geneset") %>%
+      set_colnames(c("geneset", "gene")) %>% 
+      mutate(
+        geneset = str_remove(geneset, pattern = "\\d{1,3}$"), 
+
+        type = case_when(
+          grepl(geneset, pattern = "^CD") ~ "childhood", 
+          TRUE ~ "adult"
+    )
+   ) 
+  ) %>% 
+  mutate(
+      geneset = case_when(
+      grepl(geneset, pattern = "1A") ~ "Lysosomal disorders", 
+      grepl(geneset, pattern = "1B") ~ "Other disorders of lipid metabolism & transport", 
+      grepl(geneset, pattern = "1C") ~ "Disorders of amino acid & other organic acid metabolism", 
+      grepl(geneset, pattern = "1D") ~ "Vitamin-responsive inborn errors of metabolism", 
+      grepl(geneset, pattern = "1E") ~ "Disorders of mineral absorption & transport", 
+      grepl(geneset, pattern = "1F") ~ "Peroxisomal diseases", 
+      grepl(geneset, pattern = "1G") ~ "Mitochondrial disorders", 
+      grepl(geneset, pattern = "1H") ~ "Other inborn errors of metabolism", 
+      grepl(geneset, pattern = "2_") ~ "Leukodystrophies not notherwise categorised", 
+      grepl(geneset, pattern = "3_") ~ "Neurodegeneration with brain iron accumulation", 
+      grepl(geneset, pattern = "4_") ~ "Diseases not otherwise categorised",
+      TRUE ~ geneset
+      
+    ) %>% 
+      str_wrap(width = 30),
+      geneset = fct_infreq(geneset),  # Reorder by frequency, 
+  ) %>% 
+  ggplot(
+    aes(x = geneset, fill = type)
+    )+
+  geom_bar(size = 1) +
+  #easy_rotate_x_labels(angle =-90) +
+  labs(
+    y = "# genes"
+  ) +
+  facet_wrap(
+    ~type, 
+    ncol = 1, 
+    scales = "free_y",
+    space = "free_y", 
+    strip.position = "right") +
+  coord_flip() +
+  scale_fill_manual(
+    values = c("#FF6666","#3399FF")) 
+  # theme(
+  #   plot.margin = margin(r = 2, unit = "cm"), 
+  #   legend.position = "none",
+  #   panel.grid = element_blank(),
+  # 
+  #   text = element_text(colour = "white"),
+  #   axis.title = element_text(colour = "white"),
+  #   axis.text = element_text(colour = "white"),
+  #   
+  #   #strip.background = element_blank(), 
+  #   plot.background = element_rect(fill = "#25283D"),
+  #   plot.background = element_blank(),
+  #   panel.grid.minor = element_blank(),
+  #   panel.background = element_blank(), 
+  # )
+  # ggsave("output/plots4poster/numGenes.svg", 
+  #        width = 20, height = 18, units = "cm", scale= 0.8)
+
+```
 
 
+```{r}
+# Define path
+base_path <- "data/results/results_3"
+
+# Read enrichment files
+enrichment_dfs.2 <- 
+  list.files(base_path, recursive = TRUE, full.names = TRUE) %>%
+  grep(pattern = "network_colocalization_enrichment", 
+       value = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/network_colocalization_enrichment.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0(base_path, "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y)) %>% 
+  bind_rows() %>%
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>%
+  pivot_longer(
+    cols = c(observed_overlap, expected_overlap_mean),
+    names_to = "type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = recode(type,
+                  "observed_overlap" = "observed",
+                  "expected_overlap_mean" = "expected")
+  ) %>% 
+  mutate(source = "GWAS only (no parental proxy)")
+```
+
+## plot observed v expected ratio
+
+```{r}
+enrichment_dfs.2 %>% 
+  bind_rows(enrichment_dfs %>% mutate(source = "Clingen, NDKP, familial")) %>% 
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>% 
+  mutate(
+    # use the childhood vector to extract the CD seed gene name
+    CD = purrr::map_chr(comparison, ~ {
+      match <- childhood[startsWith(.x, childhood)]
+      if (length(match) > 0) match[1] else NA_character_
+    }),
+
+    adult = str_remove(comparison, pattern = "CD_.+_.+_"),
+    adult = case_when(
+      adult == "malform" ~ "brain_malform", 
+      TRUE ~ adult
+    ),
+    .after = obs_exp, 
+    FDR = p.adjust(empirical_p, "fdr")
+  ) %>% 
+    mutate(
+      CD = case_when(
+      grepl(CD, pattern = "1A") ~ "Lysosomal disorders", 
+      grepl(CD, pattern = "1B") ~ "Other disorders of lipid metabolism & transport", 
+      grepl(CD, pattern = "1C") ~ "Disorders of amino acid & other organic acid metabolism", 
+      grepl(CD, pattern = "1D") ~ "Vitamin-responsive inborn errors of metabolism", 
+      grepl(CD, pattern = "1E") ~ "Disorders of mineral absorption & transport", 
+      grepl(CD, pattern = "1F") ~ "Peroxisomal diseases", 
+      grepl(CD, pattern = "1G") ~ "Mitochondrial disorders", 
+      grepl(CD, pattern = "1H") ~ "Other inborn errors of metabolism", 
+      grepl(CD, pattern = "2_") ~ "Leukodystrophies not notherwise categorised", 
+      grepl(CD, pattern = "3_") ~ "Neurodegeneration with brain iron accumulation", 
+      grepl(CD, pattern = "4_") ~ "Diseases not otherwise categorised",
+      TRUE ~ CD) %>% str_wrap(width = 20)
+    ) %>%  
+  dplyr::filter(type == "observed") %>% 
+  
+  ggplot(
+    aes(x = obs_exp, y = reorder(adult, obs_exp))
+  ) +
+  geom_col(
+    aes(fill = source, alpha = FDR < 0.05), 
+    colour = "grey50", position = "dodge", 
+    width = 0.75
+  ) +
+  scale_fill_viridis_d() +
+  scale_alpha_manual(values = c(0.1, 1)) +
+  labs(
+    x = "observed / expected", 
+    y = "Disease"
+  ) +
+  facet_wrap(~CD, ncol = 3) 
+  # theme(legend.position = "top") +
+  # ggsave(
+  #   "output/figs/paper/networkcoloc_v2.svg",
+  #   width = 20, height = 20, units = "cm",
+  #   scale = 1
+  )
+```
+
+```{r}
+tony2keep = c("DLB", "brain_malform")
+
+enrichment_dfs.2 %>% 
+  bind_rows(
+    enrichment_dfs %>% 
+      mutate(source = "Tony") %>% 
+      dplyr::filter(
+        grepl(comparison, pattern = "DLB|brain_malf")
+      )
+  ) %>% 
+  dplyr::filter(
+    z_comb == 3, z_12 == 1.5
+  ) %>% 
+  mutate(
+    # use the childhood vector to extract the CD seed gene name
+    CD = purrr::map_chr(comparison, ~ {
+      match <- childhood[startsWith(.x, childhood)]
+      if (length(match) > 0) match[1] else NA_character_
+    }),
+    CD = case_when(
+      grepl(CD, pattern = "1A") ~ "Lysosomal disorders", 
+      grepl(CD, pattern = "1B") ~ "Other disorders of lipid metabolism & transport", 
+      grepl(CD, pattern = "1C") ~ "Disorders of amino acid & other organic acid metabolism", 
+      grepl(CD, pattern = "1D") ~ "Vitamin-responsive inborn errors of metabolism", 
+      grepl(CD, pattern = "1E") ~ "Disorders of mineral absorption & transport", 
+      grepl(CD, pattern = "1F") ~ "Peroxisomal diseases", 
+      grepl(CD, pattern = "1G") ~ "Mitochondrial disorders", 
+      grepl(CD, pattern = "1H") ~ "Other inborn errors of metabolism", 
+      grepl(CD, pattern = "2_") ~ "Leukodystrophies not notherwise categorised", 
+      grepl(CD, pattern = "3_") ~ "Neurodegeneration with brain iron accumulation", 
+      grepl(CD, pattern = "4_") ~ "Diseases not otherwise categorised"
+    ) %>% 
+      str_wrap(width = 22),
+    adult = str_remove(comparison, pattern = "CD_.+_.+_"),
+    adult = case_when(
+      adult == "malform" ~ "brain_malform", 
+      TRUE ~ adult
+    ),
+    .after = obs_exp, 
+    FDR = p.adjust(empirical_p, "fdr")
+  ) %>% 
+  dplyr::filter(
+    type == "observed",
+    CD != "Other inborn errors\nof metabolism"
+  ) %>% 
+  ggplot(
+    aes(x = obs_exp, y = reorder(adult, obs_exp))
+  ) +
+  geom_col(
+    aes(fill = -log10(FDR), alpha = FDR < 0.05), 
+    colour = "grey50", 
+    position = "dodge", width = 0.7
+  ) +
+  scale_fill_viridis_c(option = "viridis", begin = 0.6) +
+  scale_alpha_manual(values = c(0.1, 1)) +
+  labs(
+    x = "observed / expected", 
+    y = "adult-onset NDD", 
+  ) +
+  facet_wrap(~CD, nrow = 3) +
+  theme(
+    
+    legend.position = "top",
+    
+    text = element_text(colour = "white"),
+    axis.title = element_text(colour = "white"),
+    axis.text = element_text(colour = "white"),
+    
+    strip.background = element_blank(), 
+    legend.background = element_blank(),
+    plot.background = element_rect(fill = "#25283D"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+    
+  ) 
+  # ggsave("output/plots4poster/networkcoloc_v2.svg", 
+  #        width = 45, height = 40, units = "cm", 
+  #        scale = 0.4)
+  # 
+```
 
 
+## pathways
+```{r}
+sig.networks.2 <- 
+  enrichment_dfs.2 %>% 
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>% 
+  mutate(FDR = p.adjust(empirical_p, method ="fdr")) %>% 
+  dplyr::filter(FDR < 0.05) %>% 
+  .$comparison %>% 
+  unique
+```
+
+### whole subnetworks
+```{r}
+node_metadata.2 <- 
+  list.files(path = "data/results/results_3", 
+             pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/overlapping_nodes_metadata.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/results_3", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+enrichment.wholesubnet.kegg.2 <- 
+  node_metadata.2[sig.networks.2] %>% 
+  lapply(magrittr::extract2, "X") %>% 
+  sapply(runKEGG, simplify = F)
+
+enrichment.wholesubnet.kegg.2 %>% 
+  lapply(function(x) {
+    x$Description
+  }) %>% 
+  fromList() %>% 
+  UpSetR::upset(
+    nsets = length(.), 
+    order.by = "freq"
+  )
+```
+
+```{r}
+  gprofiler.wholenet.genesetsv2 <- node_metadata.2[sig.networks.2] %>% 
+  lapply(magrittr::extract2, "X") %>% 
+  sapply(function(x) {
+    gost(query = x, 
+         organism = "gp__XoLn_Cg43_BEg", 
+         ordered_query = FALSE, 
+         significant = TRUE, # only return sig results
+         user_threshold = 0.05,
+         correction_method = "fdr",
+         domain_scope = "annotated", # only analyse genes with the annotation. 
+         evcodes = TRUE,
+         custom_bg = nodes) %>% 
+      .$result %>% 
+      as_tibble
+  }, simplify = F)
+
+gprofiler.wholenet.genesetsv2 %>% 
+  imap(~ mutate(.x, comparison = .y)) %>% 
+  bind_rows() %>% 
+  group_by(term_id) %>% 
+  summarise(
+    n = n()
+    ) %>% 
+  arrange(-n)
+
+gprofiler.wholenet.genesetsv2 %>% 
+  lapply(extract2, "term_id") %>% 
+  fromList %>% 
+  upset(
+    nsets = length(.), 
+    order.by = "freq", 
+    mb.ratio = c(0.5,0.5)
+  )
+```
 
 
+### clusters
+```{r}
+cluster.gprofiler.results.2 <- 
+  list.files(path = "data/results/results_3", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/results_3", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+# only keep the significant subnets
+cluster.gprofiler.results.2 <- cluster.gprofiler.results.2[sig.networks.2]
 
 
+```
 
+# output
+## output files some for william
+```{r}
+cluster.gprofiler.results %>% 
+  lapply(function(x) {
+    x %>% 
+      write_csv(paste0("output/network_pathways/genesets_v1/clusters/", unique(x$comparison), ".csv"))
+  })
 
+cluster.gprofiler.results.2 %>% 
+  lapply(function(x) {
+    x %>% 
+      write_csv(paste0("output/network_pathways/genesets_v2/clusters/", unique(x$comparison), ".csv"))
+  })
+
+enrichment.wholesubnet.kegg %>% 
+   imap(~ mutate(.x, comparison = .y)) %>% 
+    lapply(function(x) {
+    x %>% 
+      write_csv(paste0("output/network_pathways/genesets_v1/wholenetwork/", unique(x$comparison), ".csv"))
+    })
+
+enrichment.wholesubnet.kegg.2 %>% 
+   imap(~ mutate(.x, comparison = .y)) %>% 
+    lapply(function(x) {
+    x %>% 
+      write_csv(paste0("output/network_pathways/genesets_v2/wholenetwork/", unique(x$comparison), ".csv"))
+    })
+
+gprofiler.wholenet.genesetsv1 %>% 
+   imap(~ mutate(.x, comparison = .y)) %>% 
+    lapply(function(x) {
+    x %>% 
+      write_csv(paste0("output/network_pathways/genesets_v1/wholenetwork_gprofiler/", unique(x$comparison), ".csv"))
+    })
+
+gprofiler.wholenet.genesetsv2 %>% 
+   imap(~ mutate(.x, comparison = .y)) %>% 
+    lapply(function(x) {
+    x %>% 
+      write_csv(paste0("output/network_pathways/genesets_v2/wholenetwork_gprofiler/", unique(x$comparison), ".csv"))
+    })
+      
+```
+## Figs
+### n genes per gs
+```{r}
+genesets %>% 
+  unlist %>% 
+  as.data.frame(col.names = "gene") %>% 
+  rownames_to_column("geneset") %>%
+  set_colnames(c("geneset", "gene")) %>% 
+  mutate(
+    geneset = str_remove(geneset, pattern = "\\d{1,3}$"), 
+    geneset = fct_infreq(geneset), # Reorder by frequency, 
+    type = case_when(
+      grepl(geneset, pattern = "^CD") ~ "childhood", 
+      TRUE ~ "adult"
+    )
+   
+   ) %>% 
+  ggplot(
+    aes(x = geneset)
+  ) +
+  geom_bar() +
+  easy_rotate_x_labels(angle = -45) +
+  labs(
+    title = "Number of genes per gene set", 
+    y = "# genes"
+  ) +
+  facet_wrap(~type, scales = "free_x") +
+  theme(
+    plot.margin = margin(r = 2, unit = "cm")
+  ) +
+    ggsave(
+    "output/adult child subtypes/figs/talk/numgenespergs.svg", 
+    width = 8, height = 4, units = "cm", 
+    scale = 2
+  )
+```
+
+### netcoloc
+```{r}
+enrichment_dfs %>% 
+  bind_rows() %>% 
+  as_tibble %>% 
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>% 
+  mutate(
+    # use the childhood vector to extract the CD seed gene name
+    CD = purrr::map_chr(comparison, ~ {
+      match <- childhood[startsWith(.x, childhood)]
+      if (length(match) > 0) match[1] else NA_character_
+    }),
+
+    adult = str_remove(comparison, pattern = "CD_.+_.+_"),
+    adult = case_when(
+      adult == "malform" ~ "brain_malform", 
+      TRUE ~ adult
+    ),
+    .after = obs_exp, 
+    FDR = p.adjust(empirical_p, "fdr")
+  ) %>% 
+  dplyr::filter(type == "observed") %>% 
+  dplyr::filter(
+    CD != "CD_4_notcateg", 
+    CD != "CD_1H_other_IEMs"
+    ) %>%
+  
+  # make new names
+  
+  mutate(
+    CD = case_when(
+      grepl(CD, pattern = "1A") ~ "Lysosomal disorders", 
+      grepl(CD, pattern = "1B") ~ "Other disorders of lipid metabolism & transport", 
+      grepl(CD, pattern = "1C") ~ "Disorders of amino acid & other organic acid metabolism", 
+      grepl(CD, pattern = "1D") ~ "Vitamin-responsive inborn errors of metabolism", 
+      grepl(CD, pattern = "1E") ~ "Disorders of mineral absorption & transport", 
+      grepl(CD, pattern = "1F") ~ "Peroxisomal diseases", 
+      grepl(CD, pattern = "1G") ~ "Mitochondrial disorders", 
+      grepl(CD, pattern = "1H") ~ "Other inborn errors of metabolism", 
+      grepl(CD, pattern = "2_") ~ "Leukodystrophies not otherwise categorised", 
+      grepl(CD, pattern = "3_") ~ "Neurodegeneration with brain iron accumulation", 
+      grepl(CD, pattern = "4_") ~ "Diseases not otherwise categorised"
+    ) %>% 
+      str_wrap(width = 22),
+  ) %>% 
+  
+  ggplot(
+    aes(x = obs_exp, y = reorder(adult, obs_exp))
+  ) +
+  geom_col(
+    aes(
+      fill = -log10(FDR), 
+      alpha = FDR < 0.05
+      ), 
+    colour = "grey50"
+  ) +
+  scale_fill_viridis_c() +
+  scale_alpha_manual(values = c(0.1, 1)) +
+  labs(
+    x = "observed / expected", 
+    y = "adult-onset NDD", 
+    title = "pairwise contrasts between CD & adult-onset NDD"
+  )  +
+  facet_wrap(~CD, ncol = 3) +
+    ggsave(
+    "output/adult child subtypes/figs/talk/networkcoloc.svg", 
+    width = 20, height = 14, units = "cm", 
+    scale = 1
+  )
+```
+
+##

@@ -1,0 +1,145 @@
+---
+title: "06_ALS_FTD_scRNAseq_v1"
+author: "Karissa Barthelson"
+date: "2025-12-05"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+```{r}
+
+library(tidyverse)
+library(forcats)
+library(magrittr)
+library(readxl)
+library(qs) # for fast save and reading of objects into memory (alternative to rds)
+library(org.Hs.eg.db)
+
+# vis
+library(pander)
+library(ggpubr)
+```
+
+# introduction
+
+here, i will assess the differential expression of network genes in the ALS/FTD dataset from [Pineda et al. 2024 (cell)](https://www.cell.com/cell/fulltext/S0092-8674(24)00234-4)
+
+In the interest of time and effort, I'm just going to use the DE genes they defined. 
+
+## data import
+```{r}
+files <- list.files("data/public data/ALS_FTD_scRNAseq/20251205", 
+           full.names = T)
+
+files %>% 
+  grep(pattern = ".+20251205/\\d", value = T) %>% 
+  .[1] %>% 
+  excel_sheets() %>% 
+  map_dfr(
+    read_excel,
+    path = files %>% 
+      grep(pattern = ".+20251205/\\d", value = T) %>% 
+      .[1] 
+      )
+
+read_datas <- function(file_path) {
+  
+  # Get all sheet names in the current Excel file
+  sheet_names <- excel_sheets(file_path)
+  print(sheet_names)
+  
+  # Read all sheets using the sheet names as input
+  sheet_list <- sheet_names %>%
+    set_names(sheet_names) %>% # Use the sheet names to name the list elements
+    map(~ read_excel(
+      path = file_path,
+      sheet = .x
+  ))
+  
+  
+}
+
+toptables <- files %>%
+  # the sheets which start with 6 are the cell-type specific DE gen4e
+  grep(pattern = ".+20251205/6", value = T) %>%
+  set_names(basename(.)) %>%  # Optional: Name the outer list by file name
+  map(read_datas)
+
+
+nodes = readRDS("data/R_objects/network/nodes.rds")
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(
+    path = "data/results/adultchildsubtypes", 
+    pattern = "overlapping_nodes_metadata", 
+    recursive = TRUE, full.names = TRUE
+  ) %>% 
+  set_names(
+    str_replace(
+      ., 
+      pattern = "/overlapping_nodes_metadata.csv",
+      replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+```
+
+```{r}
+# tidy up toptables names
+names(toptables) %<>% 
+  str_remove("6_.+deg_res_") %>% 
+  str_remove(".xlsx")
+
+# add a column which specifies the cell type and disease group
+toptables %<>% 
+# Outer map2: .x = inner list, .y = disease_group name
+  map2(.y = names(.), .f = ~ {
+    disease_name <- .y # Capture the disease group name explicitly
+
+    # Inner map2: .x = tibble, .y = celltype name
+    .x %>%
+      map2(.y = names(.x), .f = ~ {
+        .x %>%
+          mutate(
+            celltype = .y,          # .y is the celltype name (e.g., Vasc.Mural.Pericyte)
+            disease_group = disease_name # Use the captured disease_name (e.g., BA9_C9FTLD)
+          )
+      })
+  }) 
+```
+
+## assess expression of network genes
+I now will assess the expression of the network genes in ALS nad FTLD, (both familial and sporadic forms)
+
+```{r}
+toptables %>% 
+  list_c() %>% 
+  list_rbind() %>% 
+  dplyr::filter(
+    Gene %in% node_metadata$CD_1A_lyso_ALS$X,
+    padj < 0.05
+    ) %>% 
+  group_by(disease_group, celltype) %>% 
+  summarise(n = n()) %>% 
+  ungroup %>% 
+  tidyHeatmap::heatmap(
+    .row = celltype, 
+    .column = disease_group,
+    .value = n, 
+   
+    cluster_columns = FALSE
+  )
+```
+
+
+
+
+
+
