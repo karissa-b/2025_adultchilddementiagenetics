@@ -1,3 +1,4 @@
 # Data
 
-Save raw data files here.
+results_3 = GWAS only genesets
+

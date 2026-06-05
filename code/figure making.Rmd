@@ -227,7 +227,7 @@ ggarrange(DimPlot(seurat_objects$mouse_Npc1,
         label = F),
   
 widths = c(2,1.2), nrow = 1
-) +
+) 
   ggsave(
     "output/Npc1mousebrain_snRNAseq/figs/talk/umap.png", 
     
@@ -432,12 +432,34 @@ dev.off()
 
 ```{r}
 
-dotplot(ORA.clusters$human_DLB$C438,   showCategory = 20,) +
+keep <- 
+  ORA.clusters$human_DLB$C436 %>% 
+  as_tibble %>% 
+  dplyr::select(subcategory, Description) %>% #view
+  dplyr::filter(
+    !(Description %in% c(
+      "Viral myocarditis",
+      "Allograft rejection",
+      "Graft-versus-host disease",
+      "Rheumatoid arthritis",
+      "Autoimmune thyroid disease",
+      "Human T-cell leukemia virus 1 infection",
+      "Type I diabetes mellitus",
+      "Herpes simplex virus 1 infection",
+      "Virion - Hepatitis viruses",
+      "Virion - Lassa virus and SFTS virus",
+      "Tuberculosis"
+    ))
+  ) %>% 
+  .$Description
+  view
+
+dotplot(ORA.clusters$human_DLB$C436,showCategory = 30,) +
 cnetplot(
-  x = setReadable(ORA.clusters$human_DLB$C438, 
+  x = setReadable(ORA.clusters$human_DLB$C436, 
                   OrgDb = org.Hs.eg.db, keyType = "ENTREZID"),
   #oldChange = fc.entrez,
-  showCategory = 40,
+  showCategory = keep,
   circular = FALSE,
   color_category='grey20', size_category = 0.5,
   color_item = "grey90", 
@@ -446,12 +468,54 @@ cnetplot(
   plot_layout(
     widths = c(1,4), 
     # heights = c(1,0.5)
-    ) +
+    )  +
   ggsave(
-    "output/plots/DLB and NPC/cluster438_dotplot_network.png", 
-    width = 16, height =7, units = "cm", 
+    "output/figs/paper/cluster436_dotplot_network.png", 
+    width = 16, height =10, units = "cm", 
      scale = 3)
   
+keep <- 
+  ORA.clusters$ $C436 %>% 
+  as_tibble %>% 
+  dplyr::select(subcategory, Description) %>% #view
+  dplyr::filter(
+    !(Description %in% c(
+      "Viral myocarditis",
+      "Allograft rejection",
+      "Graft-versus-host disease",
+      "Rheumatoid arthritis",
+      "Autoimmune thyroid disease",
+      "Human T-cell leukemia virus 1 infection",
+      "Type I diabetes mellitus",
+      "Herpes simplex virus 1 infection",
+      "Virion - Hepatitis viruses",
+      "Virion - Lassa virus and SFTS virus",
+      "Tuberculosis"
+    ))
+  ) %>% 
+  .$Description
+  view
+
+dotplot(ORA.clusters$human_DLB$C436,showCategory = 30,) +
+cnetplot(
+  x = setReadable(ORA.clusters$human_DLB$C436, 
+                  OrgDb = org.Hs.eg.db, keyType = "ENTREZID"),
+  #oldChange = fc.entrez,
+  showCategory = keep,
+  circular = FALSE,
+  color_category='grey20', size_category = 0.5,
+  color_item = "grey90", 
+  colorEdge = F
+) +
+  plot_layout(
+    widths = c(1,4), 
+    # heights = c(1,0.5)
+    )  +
+  ggsave(
+    "output/figs/paper/cluster436_dotplot_network.png", 
+    width = 16, height =10, units = "cm", 
+     scale = 3)
+
 ```
 
 ```{r}

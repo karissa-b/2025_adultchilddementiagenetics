@@ -1,0 +1,284 @@
+---
+title: "netcoloc - adult and non neurodegen IEMs"
+author: "Karissa Barthelson"
+date: "2026-02-25"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+## Introduction
+```{r}
+knitr::opts_chunk$set(
+  message = F, echo = T, warning = F
+)
+```
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+
+# vis
+library(ComplexUpset)
+library(UpSetR)
+library(pander)
+library(ggeasy)
+library(ggfortify)
+library(ggpubr)
+library(ggrepel)
+library(plotly)
+library(tidyHeatmap)
+library(grid)
+library(gridExtra)
+library(gridGraphics)
+library(viridis)
+library(tidytext)
+library(pheatmap)
+library(patchwork)
+
+# annotations
+library(org.Hs.eg.db)
+library(ndexr)
+
+# enrichemnt
+library(clusterProfiler)
+library(gprofiler2)
+library(ReactomePA)
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+
+# import 
+```{r}
+## the nodes in PCNet
+# the background gene set will be all genes found in the PCNet, as these are the ones I am analysing. The node info was obtained from NDex. 
+nodes <- readRDS("data/R_objects/network/nodes.rds")
+
+
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(
+    path = "data/results/adult and non-neurodegen IEMs", 
+    pattern = "overlapping_nodes_metadata", 
+    recursive = TRUE, full.names = TRUE
+  ) %>% 
+  set_names(
+    str_replace(
+      ., 
+      pattern = "/overlapping_nodes_metadata.csv",
+      replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adult and non-neurodegen IEMs", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+
+## enrichment netcoloc
+enrichment_dfs <- 
+  list.files(
+    "data/results/adult and non-neurodegen IEMs", 
+    recursive = TRUE, full.names = TRUE) %>%
+  grep(pattern = "network_colocalization_enrichment", 
+       value = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/network_colocalization_enrichment.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0(
+          "data/results/adult and non-neurodegen IEMs", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y)) %>% 
+  bind_rows() %>%
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>%
+  pivot_longer(
+    cols = c(observed_overlap, expected_overlap_mean),
+    names_to = "type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = recode(type,
+                  "observed_overlap" = "observed",
+                  "expected_overlap_mean" = "expected")
+  )
+
+```
+
+## coloc
+```{r}
+enrichment_dfs %>% 
+  mutate(
+    FDR = p.adjust(empirical_p), 
+  ) %>% 
+  ggplot(
+    aes(x = type, y = value, fill = type)
+    ) +
+  geom_bar(
+    stat = "identity", position = "dodge", width = 0.8
+  ) +
+  geom_errorbar(
+    data = . %>% 
+      dplyr::filter(type == "expected"),
+    aes(
+      ymin = value - 2 * expected_overlap_std,
+      ymax = value + 2 * expected_overlap_std),
+    width = 0.25
+  ) + 
+  geom_label(
+    data =  . %>%
+      dplyr::filter(type == "expected"),
+    aes(
+      x = 1.5, y = 1000,
+        label = sprintf("FDR = %.1e", empirical_p)),
+    inherit.aes = FALSE,
+    fill = NA,
+    border.colour = NA,
+    size = 4,
+    vjust = 0,
+    fontface = "bold",
+    show.legend = FALSE
+  )  +
+  labs(
+    y = "Number of genes", 
+    x = ""
+  ) +
+  facet_wrap(~comparison, 
+             nrow = 5) +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("grey50", "skyblue"))+
+   theme(
+    
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+   ) 
+```
+
+### obs/expected
+```{r}
+p1 = enrichment_dfs %>% 
+  bind_rows() %>% 
+  # bind_rows(enrichment_dfs2) %>% 
+  as_tibble %>%  
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>% 
+  dplyr::filter(
+    type == "observed",
+    comparison != "PD_AD") %>% 
+  mutate(
+    FDR = p.adjust(empirical_p, "fdr"), 
+    adult = str_extract(comparison, pattern = "AD|PD|DLB|ALS|FTLD|brain_malform"), 
+    CD = str_remove(comparison, pattern = "AD|PD|DLB|ALS|FTLD|brain_malform"), 
+    CD = str_remove_all(CD, pattern = "_"), 
+    order = case_when(
+      grepl(comparison, pattern = "^CD") ~ "childhood dementia", 
+      TRUE ~ "non neurodegen IEM"
+    ),
+    facet = interaction(order, CD, sep = " | ") 
+  ) %>% 
+  arrange(CD) %>% 
+  mutate(facet = fct_inorder(facet)) %>% 
+  ggplot(
+    aes(x = obs_exp, y = reorder(adult, obs_exp))
+  ) +
+  geom_col(
+    aes(fill = -log10(FDR), alpha = FDR < 0.05), 
+    colour = "grey50"
+  ) +
+  geom_vline(
+    xintercept = 1
+  ) +
+  scale_fill_viridis_c(option = "magma") +
+  scale_alpha_manual(values = c(0.1, 1)) +
+  labs(
+    x = "observed / expected", 
+    y = "Disease"
+  ) +
+  facet_wrap(~facet)
+p1            
+```
+### coloc pairs
+```{r}
+
+p2 = enrichment_dfs %>% 
+  bind_rows() %>% 
+  bind_rows(enrichment_dfs2) %>% 
+  as_tibble %>% 
+  dplyr::filter(
+    z_comb == 3, z_12 == 1.5, 
+    type == "observed"
+  ) %>% 
+  mutate(
+    FDR = p.adjust(empirical_p, "fdr"), 
+    adult = str_extract(comparison, pattern = "AD|PD|DLB|ALS|FTLD|brain_malform"), 
+    CD = str_remove(comparison, pattern = "AD|PD|DLB|ALS|FTLD|brain_malform"), 
+    CD = str_remove_all(CD, pattern = "_"), 
+    order = case_when(
+      grepl(comparison, pattern = "^CD") ~ "childhood dementia", 
+      TRUE ~ "non neurodegen IEM"
+    ),
+  ) %>% 
+  dplyr::filter(
+    grepl(CD, pattern = "lyso|mito|perox|amino")
+    ) %>% 
+  mutate(
+    type = case_when(
+      CD %in% c("CD1Alyso", "nonCDlyso") ~ "lysosomal", 
+      CD %in% c("CD1Gmito", "mitochondrial") ~ "mitochondrial", 
+      CD %in% c("CD1Fperox", "peroxisomal") ~ "peroxisomal", 
+      CD %in% c("CD1Caminoacids", "aminoacidopathy") ~ "amino acid diseases", 
+    )
+  ) %>% 
+  ggplot(
+    aes(x = obs_exp, y = reorder(adult, obs_exp))
+  ) +
+  geom_col(
+    aes(fill = order, alpha = FDR < 0.05), 
+    colour = "grey50", 
+    position = "dodge"
+  ) +
+  geom_vline(
+    xintercept = 1
+  ) +
+  scale_fill_viridis_d() +
+  scale_alpha_manual(values = c(0.1, 1)) +
+  labs(
+    x = "observed / expected", 
+    y = "Disease"
+  ) +
+  facet_wrap(~type, nrow = 1)
+
+p2             
+```
+
+
+
+```{r}
+ggarrange(p1 +
+            ggtitle("All CD & non neurodegen IEMs"), 
+          p2 +
+            ggtitle("pairs of neurodegen & non-neurodegen IEMs"), 
+          common.legend = F, 
+          heights = c(2,1),
+          ncol = 1) +
+  ggsave("output/plots/CDandnonCD netcoloc draft.png", 
+         scale = 2)
+```
+

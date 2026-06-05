@@ -71,7 +71,7 @@ data.seurat <- CreateSeuratObject(
   min.cells = 3 #include genes expressed in at least this many nuclei
   )
 
-# join the metadata to the eurat object
+# join the metadata to the seurat object
 data.seurat@meta.data %<>% 
   as_tibble(rownames = "umi") %>% 
   left_join(
@@ -145,7 +145,7 @@ I first want to suss the clustering before doing any filtering - how pure are th
 #   ScaleData() %>% 
 #   RunPCA()
 # ElbowPlot(temp, ndims = 30)
-remove(temp)
+#remove(temp)
 
 data.seurat %<>% 
   NormalizeData() %>% 
@@ -257,9 +257,6 @@ runFeatureplot(
 ```
 
 
-
-
-
 ## filtering
 I will filter the data based on the number of features (genes) detected per cell, the number of counts per cell and the percentage of mitochondrial genes expressed.
 ```{r}
@@ -270,7 +267,7 @@ data.seurat.filt <- data.seurat %>%
   ) %>% 
   NormalizeData() %>% 
   FindVariableFeatures() %>% 
-  ScaleData() %>% 
+  ScaleData(features = rownames(.)) %>% 
   RunPCA() %>% 
   FindNeighbors(dims = 1:20) %>% 
   FindClusters(resolution = 0.3) %>% # less clusters
@@ -297,124 +294,199 @@ markers.2 <-FindAllMarkers(data.seurat.filt, only.pos = TRUE) %>%
   split(f = .$cluster)
 ```
 
-### Cluster 0 and 1
+### Neuron Exc - 0,1, 7, 14, maybe 16
 ```{r}
+
+VlnPlot(
+    object = data.seurat.filt, 
+    features = c("Gabra6", "Kcnd2", "Grik2", "Tenm1"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T)   
+
 runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Gabra6", "Kcnd2", "Grik2", "Tenm1"), 
+  seurat.object = data.seurat.filt,  
+  genes = 
   celltype = "Granule cells")
 ```
 
-### Cluster 2
+### Microglia - 4,15
 ```{r}
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Gria1","Slc1a3", "Gabrb1", "Luzp2"), 
-  celltype = "Bergman Astrocytes")
+VlnPlot(
+    object = data.seurat.filt, 
+    features = c("C1qa", "C1qb", "C1qc", "Mpeg1"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T)
 ```
 
-### Cluster 3
+### Bergman Astrocytes - 2,3,8
+
 ```{r}
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Hexb", "C1qa", "Ctss", "Trem2"), 
-  celltype = "Macrophage & Microglia")
+
+VlnPlot(
+    object = data.seurat.filt, 
+    features = c("Gria1","Slc1a3", "Gabrb1", "Luzp2"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T)   
 ```
 
-### Cluster 4 
+
+### Oligodend 5 & 10 - maybe 7
 ```{r}
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Mobp", "Mbp", "Prr5l", "Plp1"), 
-  celltype = "Oligodendrocytes")
+VlnPlot(
+    object = data.seurat.filt, 
+    features =  c("Mobp", "Mbp", "Prr5l", "Plp1"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T)   
+
 ```
 
 
-### Cluster 5
+### Endothelial stalk cells - 6
 Endothelial stalk cells are specialized vascular cells vital in angiogenesis, a process through which new blood vessels are formed from pre-existing ones; specifically, endothelial stalk cells are involved in sprouting angiogenesis, where they help form the body of new blood vessels. 
 ```{r}
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Flt1", "Ly6c1", "Cldn5", "Slco1a4"), 
-  celltype = "Endothelial stalk cells")
 
+VlnPlot(
+    object = data.seurat.filt, 
+    features =  c("Flt1", "Ly6c1", "Cldn5", "Slco1a4"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T)   
 ```
 
 
-### Cluster 6
+### Astrocytes - 2,3,8
 ```{r}
+
+VlnPlot(
+    object = data.seurat.filt, 
+    features =  c("Slc4a4","Aqp4", "Gabrb1", "Npas3", "Gfap"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T) 
+
 runFeatureplot(
   seurat.object = data.seurat.filt, 
-  genes = c("Slc4a4","Aqp4", "Gabrb1", "Npas3"), 
+  genes = c("Slc4a4","Aqp4", "Gabrb1", "Npas3", "Gfap"), 
   celltype = "Astrocytes")
 
 ```
 
-### Cluster 7
-Mixed population. Top marker genes do not have clear expression across clusters in the cerebellum (see [here](https://singlecell.broadinstitute.org/single_cell/study/SCP795/a-transcriptomic-atlas-of-the-mouse-cerebellum?genes=Fabp7&tab=distribution))
+<!-- ### Cluster 7 -->
+<!-- Mixed population. Top marker genes do not have clear expression across clusters in the cerebellum (see [here](https://singlecell.broadinstitute.org/single_cell/study/SCP795/a-transcriptomic-atlas-of-the-mouse-cerebellum?genes=Fabp7&tab=distribution)) -->
 
-Aldoc expression is observed in Astrocytes (but more so in purkinje cells) [Fugita et al. 2014](https://pmc.ncbi.nlm.nih.gov/articles/PMC3903578). 
+<!-- Aldoc expression is observed in Astrocytes (but more so in purkinje cells) [Fugita et al. 2014](https://pmc.ncbi.nlm.nih.gov/articles/PMC3903578).  -->
 
-This clister appears to mostly be present in 3 week cerebellums. 
-Also has low RNA counts. I think this cluster should be omitted from the analysis
+<!-- This clister appears to mostly be present in 3 week cerebellums.  -->
+<!-- Also has low RNA counts. I think this cluster should be omitted from the analysis -->
 
+<!-- ```{r} -->
+<!-- VlnPlot(data.seurat.filt, features = c("nCount_RNA"), pt.size = 0) -->
+<!-- DimPlot(data.seurat.filt, group.by = "genotype", split.by = "age", shuffle = TRUE) -->
+
+<!-- runFeatureplot( -->
+<!--   seurat.object = data.seurat.filt,  -->
+<!--   genes = c("Tubb2b","Fabp7", "Aldoc", "Hopx"),  -->
+<!--   celltype = "unsure") -->
+<!-- ``` -->
+
+### Endothelial cells - 9
 ```{r}
-VlnPlot(data.seurat.filt, features = c("nCount_RNA"), pt.size = 0)
-DimPlot(data.seurat.filt, group.by = "genotype", split.by = "age", shuffle = TRUE)
 
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Tubb2b","Fabp7", "Aldoc", "Hopx"), 
-  celltype = "unsure")
-```
+VlnPlot( 
+    object = data.seurat.filt, 
+    features =  c("Rgs5", "Myl9", "Igfbp7", "Notch3"), 
+    pt.size = 0, 
+    ncol = 1
+) |
 
-### Cluster 8
-```{r}
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Mobp", "Bcas1", "Mbp", "Plekhb1"), 
-  celltype = "Oligodendrocyte")
-```
+  DimPlot(data.seurat.filt,label = T) 
 
-### Cluster 9
-```{r}
 runFeatureplot(
   seurat.object = data.seurat.filt, 
   genes = c("Rgs5", "Myl9", "Igfbp7", "Notch3"), 
   celltype = "Endothelial cell")
 ```
 
-### Cluster 10
+### Neuron In - 11,16?
 ```{r}
+
+VlnPlot(
+    object = data.seurat.filt, 
+    features =c("Gad1", "Gad2", "Gria3", "Kcnma1", "Pvalb", "Slc24a2"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T) 
+
+
 runFeatureplot(
   seurat.object = data.seurat.filt, 
-  genes = c("Gria3", "Kcnma1", "Pvalb", "Slc24a2"), 
+  genes = c("Gad1", "Gad2", "Gria3", "Kcnma1", "Pvalb", "Slc24a2"), 
   celltype = "Neuron (possibly purkinje)")
 ```
 
-### Cluster 11
+### ependymal cells - 12
 
 ```{r}
+VlnPlot(
+    object = data.seurat.filt, 
+    features =c("Calml4", "Rbp1", "Sostdc1", "Igfbp2"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T) 
+
 runFeatureplot(
   seurat.object = data.seurat.filt, 
   genes = c("Calml4", "Rbp1", "Sostdc1", "Igfbp2"), 
   celltype = "ependymal cells")
 ```
 
-### Cluster 12
+### Fibroblast - 13
 ```{r}
+VlnPlot(
+    object = data.seurat.filt, 
+    features =c("Dcn", "Pdgfra", "Apod", "Col1a1"), 
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T) 
+
 runFeatureplot(
   seurat.object = data.seurat.filt, 
   genes = c("Dcn", "Pdgfra", "Apod", "Col1a1"), 
   celltype = "Fibroblast")
 ```
 
-### Cluster 13
+### OPC - cant differentiate from OPC
 ```{r}
-runFeatureplot(
-  seurat.object = data.seurat.filt, 
-  genes = c("Unc5d", "Sln", "Trpc3", "Lingo2"), 
-  celltype = "Purkinje and excitory neurons")
+VlnPlot(
+    object = data.seurat.filt, 
+    features =c("Bcas1", "Mag", "Olig1", "Olig2"),
+    pt.size = 0, 
+    ncol = 1
+) |
+
+  DimPlot(data.seurat.filt,label = T)
 ```
 
 
@@ -424,21 +496,25 @@ runFeatureplot(
 data.seurat.filt@meta.data %<>% 
   mutate(
     celltype = case_when(
-      RNA_snn_res.0.3 == "0" ~ "GranuleCells", 
-      RNA_snn_res.0.3 == "1" ~ "GranuleCells2", 
-      RNA_snn_res.0.3 == "2" ~ "BergmannGlia",
-      RNA_snn_res.0.3 == "3" ~ "Microglia",
-      RNA_snn_res.0.3 == "4" ~ "Oligodendrocyte",
-      RNA_snn_res.0.3 == "5" ~ "EndothelialStalkCells",
-      RNA_snn_res.0.3 == "6" ~ "Astrocytes",
-      RNA_snn_res.0.3 == "7" ~ "low quality",
-      RNA_snn_res.0.3 == "8" ~ "Oligodendrocyte2",
-      RNA_snn_res.0.3 == "9" ~ "EndothelialCells",
-      RNA_snn_res.0.3 == "10" ~ "NeuronPossiblePurkinjeCells",
-      RNA_snn_res.0.3 == "11" ~ "EpendymalCells",
-      RNA_snn_res.0.3 == "12" ~ "Fibroblast",
-      RNA_snn_res.0.3 == "13" ~ "PurkinjeExcitoryNeurons"
+      RNA_snn_res.0.3 == "0" ~ "NeuronEx", 
+      RNA_snn_res.0.3 == "1" ~ "NeuronEx", 
+      RNA_snn_res.0.3 == "2" ~ "Astrocyte",
+      RNA_snn_res.0.3 == "3" ~ "Astrocyte",
+      RNA_snn_res.0.3 == "4" ~ "MicrogliaImmune",
+      RNA_snn_res.0.3 == "5" ~ "Oligodendrocyte",
+      RNA_snn_res.0.3 == "6" ~ "EndothelialStalk",
+      RNA_snn_res.0.3 == "7" ~ "Oligodendrocyte",
+      RNA_snn_res.0.3 == "8" ~ "Astrocyte",
+      RNA_snn_res.0.3 == "9" ~ "Endothelial",
+      RNA_snn_res.0.3 == "10" ~ "Oligodendrocyte",
+      RNA_snn_res.0.3 == "11" ~ "NeuronIn",
+      RNA_snn_res.0.3 == "12" ~ "Ependymal",
+      RNA_snn_res.0.3 == "13" ~ "Fibroblast",
+      RNA_snn_res.0.3 == "14" ~ "NeuronEx",
+      RNA_snn_res.0.3 == "15" ~ "MicrogliaImmune",
+      RNA_snn_res.0.3 == "16" ~ "NeuronMixed",
       )
+    
     )
 ```
 
@@ -465,7 +541,11 @@ colnames(y$counts) %<>% str_remove("cluster")
 ```{r}
 y$samples %>% 
   ggplot(
-    aes(x = sample, y = lib.size, fill = age_geno, alpha = lib.size > 20000)
+    aes(
+      x = sample, y = lib.size, 
+      fill = age_geno, 
+      alpha = lib.size > 20000
+      )
   ) +
   geom_col() +
   scale_y_continuous(labels = comma) +
@@ -486,25 +566,21 @@ y$samples %>%
   ggplot(
     aes(x = sample, y = lib.size, fill = age_geno)
   ) +
-  geom_col() +
+  geom_col(
+    aes()
+  ) +
   scale_y_continuous(labels = comma) +
   facet_wrap(~celltype, scales = "free")
-
-y$samples %>% 
-  group_by(age, genotype, celltype) %>% 
-  summarise(n = n()) %>% 
-  dplyr::filter(n < 2) 
 
 # get the sample clusers to keep (still has two per group)
 keep.2 <- y$samples %>% 
   dplyr::filter(
-    !(age == "3week" & cluster == "EndothelialCells"),
-    !(age == "3week" & cluster == "EpendymalCells"),
-    !(age == "3week" & cluster == "NeuronPossiblePurkinjeCells"),
+    !(age == "3week" & cluster == "Endothelial"),
+    !(age == "3week" & cluster == "Ependymal"),
     !(age == "3week" & cluster == "Fibroblast"),
-    !(age == "3week" & cluster == "EndothelialStalkCells"),
-    !(age == "7week" & cluster == "PurkinjeExcitoryNeurons"),
-     !(cluster == "low quality"),
+    !(age == "3week" & cluster == "EndothelialStalk"),
+    !(age == "3week" & cluster == "NeuronIn"),
+     !(cluster == "NeuronMixed"),
   ) %>% 
   rownames()
 
@@ -560,7 +636,7 @@ y %>%
     aes(fill = age_geno),
     outlier.size = 0.5
                ) +
-  facet_wrap(~cluster, scales = "free") +
+  facet_wrap(~cluster, scales = "free_x") +
   easy_rotate_x_labels(angle = -45) +
   labs(title = "Distribution of logCPM values per sample",
        x = "Sample", y = "log2 CPM")
@@ -584,7 +660,7 @@ y$counts %>%
     alpha = 0.5,
     size = 6
   ) +
-  theme(aspect.ratio = 1) +
+  theme(aspect.ratio = 1)
   facet_wrap(~cluster, scales = "free") +
   scale_color_viridis_d(option = "turbo")
 ```
@@ -612,7 +688,7 @@ plotQLDisp(fit)
 
 ## contrasts matrix
 ```{r}
-# Extract cell types shared by both Control and DLB
+# Extract cell types shared by both Control and NPC1
 design_cols <- colnames(design)
 
 design_df <- tibble(colname = colnames(design)) %>%
@@ -648,8 +724,10 @@ toptables <- colnames(contrast_matrix) %>%
       ) %>% 
       mutate(
         coef = x, 
+        coef = str_remove(coef, pattern = "_Npc1 - .+$"),
         DE = FDR < 0.05
-      )
+      ) %>% 
+      dplyr::select(-starts_with("vf"), -starts_with("var"))
   }, simplify = F)
 ```
 ## volcanoplots
@@ -714,7 +792,7 @@ Here, I need to convert the human gene id to mouse id. Network genes were only r
 ```{r}
 # import clusters
 cluster.gprofiler.results <- 
-  list.files(path = "data/results/adultchildsubtypes", 
+  list.files(path = "data/results/adultchildsubtypes v2", 
              pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
   set_names(
     str_replace(., 
@@ -722,13 +800,13 @@ cluster.gprofiler.results <-
                 replacement = ""
     ) %>% 
       str_remove(
-        pattern = paste0("data/results/adultchildsubtypes", "/")
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
       )
   ) %>%   
   map(read.csv) %>%
   imap(~ mutate(.x, comparison = .y))
 
-network.genes.cluster <- 
+network.genes.cluster.DLB <- 
   cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
   dplyr::select(Cluster, genes) %>% 
   mutate(genes = str_split(genes, " ")) %>% 
@@ -738,6 +816,19 @@ network.genes.cluster <-
       as_tibble %>% 
       set_colnames("human")
   })
+
+
+network.genes.cluster.PD <- 
+  cluster.gprofiler.results$CD_1A_lyso_PD %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe() %>% 
+  lapply(function(x) {
+    x %>% 
+      as_tibble %>% 
+      set_colnames("human")
+  })
+
 
 # download the mouse2human id conversion
 mouse_human_genes = read.csv("http://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
@@ -763,7 +854,16 @@ convert_mouse_to_human <- function(gene_list){
   return(result)
 }
 
-network.genes.cluster %<>% 
+network.genes.cluster.DLB %<>% 
+  lapply(function(x) {
+    x %>% 
+      left_join(convert_mouse_to_human(rownames(y))) %>% 
+      na.omit() %>% 
+      .$mouse %>% 
+      unique()
+  })
+
+network.genes.cluster.PD %<>% 
   lapply(function(x) {
     x %>% 
       left_join(convert_mouse_to_human(rownames(y))) %>% 
@@ -773,12 +873,15 @@ network.genes.cluster %<>%
   })
 
 # for gene set testing, only retain clusters with more than 3 genes
-network.genes.cluster <- network.genes.cluster[lapply(network.genes.cluster, length) > 3]
+network.genes.cluster.DLB <-
+  network.genes.cluster.DLB[lapply(network.genes.cluster.DLB, length) > 3]
 
-  
+network.genes.cluster.PD <-
+  network.genes.cluster.PD[lapply(network.genes.cluster.PD, length) > 3]  
+
 ### obtain the genes in the subnetworks
 node_metadata <- 
-  list.files(path = "data/results/adultchildsubtypes", 
+  list.files(path = "data/results/adultchildsubtypes v2", 
              pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
   set_names(
     str_replace(., 
@@ -786,7 +889,7 @@ node_metadata <-
                 replacement = ""
     ) %>% 
       str_remove(
-        pattern = paste0("data/results/adultchildsubtypes", "/")
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
       )
   ) %>%   
   map(read.csv) %>%
@@ -799,6 +902,8 @@ network.genes %<>%
   left_join(convert_mouse_to_human(rownames(y))) %>% 
   na.omit %>% 
   dplyr::select(gene_name = mouse, everything())
+
+n
 ```
 
 
@@ -809,19 +914,20 @@ network.genes %<>%
 #### ORA of pathways in the clusters
 first, I perfored ORA analysis on the clusters themselves. this is to give biological context to the genes in each cluster. 
 ```{r}
-ORA.clusters <- network.genes.cluster %>% 
+ORA.clusters.DLB <- network.genes.cluster.DLB %>% 
   lapply(function(x) {
     clusterProfiler::enrichKEGG(
       gene = bitr(x, 
                   OrgDb = org.Mm.eg.db,
-                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
+                  fromType="SYMBOL", toType="ENTREZID") %>% 
+        .$ENTREZID,
       keyType = "ncbi-geneid", 
       organism = "mmu"
     ) 
     })
 ```
 ```{r}
-ORA.clusters %>% 
+ORA.clusters.DLB %>% 
   lapply(function(x) {
     x %>% 
       as_tibble 
@@ -849,7 +955,7 @@ ora.DEG.in.clusters <- toptables %>%
     
     clusterProfiler::enricher(
       gene = genes,
-      TERM2GENE = network.genes.cluster %>%
+      TERM2GENE = network.genes.cluster.DLB %>%
         enframe(name = "TERM", value = "GENE") %>%
         unnest(cols = "GENE"), 
       universe = x$gene
@@ -879,7 +985,7 @@ Clusters 438 and 439 are significantly enriched with DEGs in microglia. Both age
 keep = toptables %>% 
   bind_rows() %>% 
   dplyr::filter(
-    gene %in% network.genes.cluster$C439
+    gene %in% network.genes.cluster.DLB$C448
   ) %>% 
   dplyr::filter(DE == T) %>% 
   .$gene
@@ -1029,11 +1135,11 @@ plot.cnet(
 
 ## fry gene set testing
 ```{r}
-fry <- colnames(contrast_matrix) %>% 
+fry.DLB <- colnames(contrast_matrix) %>% 
   sapply(function(x) {
    cpm(y, log = T)  %>% 
       fry(
-        index = network.genes.cluster,
+        index = network.genes.cluster.DLB,
         design = design, 
         contrast = contrast_matrix[,x], 
         sort = "directional"
@@ -1046,19 +1152,38 @@ fry <- colnames(contrast_matrix) %>%
         )
   }, simplify = FALSE)
 
-fry
+
+fry.PD <- colnames(contrast_matrix) %>% 
+  sapply(function(x) {
+   cpm(y, log = T)  %>% 
+      fry(
+        index = network.genes.cluster.PD,
+        design = design, 
+        contrast = contrast_matrix[,x], 
+        sort = "directional"
+      ) %>% 
+      rownames_to_column("pathway") %>% 
+      as_tibble() %>% 
+      mutate(
+        coef = x, 
+        coef = str_extract(coef, "^([A-Za-z0-9]+)_([0-9]+week)")
+        )
+  }, simplify = FALSE)
+
+
+fry.PD
+
 sig.clusters.fry <- fry %>% 
   bind_rows() %>% 
   dplyr::filter(
-    FDR < 0.05 | FDR.Mixed < 0.05,
+     FDR.Mixed < 0.05,
     NGenes > 1
   ) %>% 
   .$pathway %>% 
   unique
   
-fry %>% 
-  bind_rows() %>% 
-  dplyr::filter(pathway %in% sig.clusters.fry) %>% 
+fry.DLB %>% 
+  bind_rows() %>%
   pivot_longer(
     cols = c(PValue, PValue.Mixed),
     names_to = "pval_type",
@@ -1078,14 +1203,41 @@ fry %>%
   ggplot(aes(x = pval_type,
              y = pathway, fill = neglog10_p, alpha = alpha_val)) +
   geom_tile() +
-  facet_wrap(~coef) +
+  facet_wrap(~coef, nrow = 1) +
   scale_fill_viridis_c(option = "plasma", name = "-log10(P)") +
   scale_alpha(range = c(0.3, 1), guide = "none") +
   labs(
     x = "Hypothesis test",
     y = "Netcoloc cluster"
+  )
+
+  
+fry %>% 
+  bind_rows() %>% 
+  dplyr::filter(pathway %in% sig.clusters.fry) %>% 
+  mutate(
+    age = str_extract(coef, pattern = "3|7"),
+    cell = str_remove(coef, pattern = "_.+$")
+  ) %>% 
+  ggplot(
+    aes(x = cell,y = pathway, fill = -log10(PValue.Mixed))) +
+  geom_tile() +
+  scale_fill_viridis_c(
+    option = "plasma", name = "-log10(P)") +
+  geom_label(
+    aes(label = signif(FDR.Mixed, 2)), 
+    data = . %>% 
+      dplyr::filter(FDR.Mixed < 0.05)
+  ) +
+  facet_wrap(~age, ncol = 1, scales = "free_x", space = "free_x")
+  labs(
+    x = "Hypothesis test",
+    y = "Netcoloc cluster"
   ) 
+
 ```
+
+
 
 ```{r}
 sig.clusters.fry <- fry %>% 
@@ -1145,15 +1297,34 @@ ORA.clusters %>%
 ora.DEG.in.clusters %>% 
   qsave("data/public data/PRJNA606815_NPC_mousebrain/R_objects/ORA_DEGs_clusters.qs")
 
-fry %>% 
-  qsave("data/public data/PRJNA606815_NPC_mousebrain/R_objects/fry_results.qs")
+list(DLB = fry.DLB, PD = fry.PD) %>% 
+  qsave("data/public data/PRJNA606815_NPC_mousebrain/R_objects/fry_results_DLB_PD_list.qs")
+
 
 toptables %>% 
   qsave("data/public data/PRJNA606815_NPC_mousebrain/R_objects/toptables.qs")
+
+list(
+  DLB = network.genes.cluster.DLB, 
+  PD = network.genes.cluster.PD
+) %>% 
+   qsave("data/public data/PRJNA606815_NPC_mousebrain/R_objects/network.genes.cluster.mouseSymbol.qs")
 ```
 
 
 
+## figs
+```{r}
+toptables %>% 
+  bind_rows() %>% 
+  dplyr::filter(gene %in% c("Pld3", "Gabarap")) %>% 
+  ggplot(
+    aes(x = -log10(PValue),y = coef, fill = as.numeric(logFC), alpha = FD)
+  ) +
+  geom_col() +
+  facet_wrap(~gene) +
+  scale_fill_gradient2(high = "darkred", low = "darkblue",mid = "white")
+```
 
 
 

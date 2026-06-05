@@ -43,13 +43,14 @@ library(ggfortify)
 library(ggrepel)
 library(tidyHeatmap)
 library(ComplexHeatmap)
+library(circlize)
 library(grid)
 
 theme_set(theme_light() +
             theme(plot.title = element_text(hjust = 0.5), 
                   strip.text = element_text(face = "bold"),
                   strip.background = element_rect(fill = "grey20")
-            )
+            ) 
 )
 
 ```
@@ -58,6 +59,9 @@ theme_set(theme_light() +
 Here, I will perform the pseudobulk comparisons within cell type between DLB and contorl brains. 
 
 The preprocessing of the data was performed previously and the seurat object was loaded. It was then converted to a PB object for use in edgeR.
+
+Note that I have tried having each celltype have its own subtypes (e.g. microglia 1, microglia 2), but this results in not enough reads per celltype to do pseudo-bulk analyses. Therefore, I will combine each celltype. 
+
 ```{r}
 # read in smaple metadata
 meta <- 
@@ -202,21 +206,56 @@ y$samples %<>%
   ) 
 ```
 
-## lib sizes
+# lib sizes
+## plot number of cells per celltype
+
+Generally there are less cells in the DLB cases vs rest
 ```{r}
+data.seurat@meta.data %>%
+  as_tibble(rownames = "umi") %>% 
+  group_by(disease, celltype) %>% 
+  summarise(n = n()) %>% 
+  ggplot(
+    aes(x = celltype, y = n)
+  ) +
+  geom_col(
+    aes(fill = disease), 
+    position = "dodge"
+  ) +
+  labs(
+    x = "Cell type", 
+    y = "Number of nuclei",
+    title = "Total number of nuclei detected in the experiment"
+  ) +
+  scale_fill_manual(values = c("#5F676D", "#17BEBB", "#FE5448", "#A20C01")) 
+
+  
+
 y$samples %>% 
   as.data.frame() %>% 
   rownames_to_column("sample_cluster") %>% 
+  arrange(disease) %>% 
+  # makase sample cluster a factor to group within disease
+  mutate(
+    sample_cluster = str_remove(sample_cluster, "cluster"),
+    sample = fct_inorder(sample)
+    ) %>% 
   ggplot(
-    aes(x = sample_cluster, y = lib.size, fill = disease)
+    aes(x = sample, y = lib.size, fill = disease)
   ) + 
   geom_col() +
   scale_y_continuous(labels = comma) +
   facet_wrap(~cluster, scales = "free_x", nrow = 2) +
-  easy_rotate_x_labels(angle = -45)
+  easy_rotate_x_labels(angle = -45) +
+  labs(
+    x = "Disease and Celltype", 
+    y = "Library size", 
+    title = "Number of reads per celltype"
+  ) +
+   scale_fill_manual(values = c("#5F676D", "#17BEBB", "#FE5448", "#A20C01")) 
 
 
-# retain samples with more than 50k counts
+# retain samsample# retain samples with more than 50k counts
 keep.samples <- y$samples$lib.size > 5e4
 y <- y[,keep.samples]
 
@@ -236,13 +275,12 @@ y$samples %>%
   )
 ```
 
-After filtering the small pseudobulk libraries (50k reads was the recommended by the edgeR manual, but this left out too many libraries),There are some celltypes n.d. in all groups. 
+After filtering the small pseudobulk libraries (50k reads was the recommended by the edgeR manual),There are some celltypes n.d. in all groups. 
 
 I will only retain clusters which are detected in all grousp. 
 
-
 ```{r}
-clusters2remove = c("Endothelial", "VLMCs", "Neuron_Ex3", "Neuron_Ex4", "Neuron_Ex5", "Neuron_In1", "Neuron_In2")
+clusters2remove = c("Endothelial", "VLMCs")
 
 samples2keep <- y$samples %>% 
   dplyr::filter(!cluster %in% clusters2remove) %>% 
@@ -274,18 +312,32 @@ y$samples %>%
   ggplot(
     aes(y = lib.size, x = cluster, colour = disease )
   ) +
-  geom_boxplot() +
+  geom_boxplot(
+    outlier.shape = NA
+  ) +
   geom_point(position = position_jitterdodge()) +
-  stat_compare_means() +
-  facet_wrap(~cluster, scales = "free_x")
+  facet_wrap(~cluster, scales = "free_x") +
+  scale_y_continuous(labels = comma) +
+  labs(
+    title = "Total number of nuclei per celltype and sample"
+    
+  )
 
 y %>% 
   cpm(log = T) %>% 
   as.data.frame() %>% 
   pivot_longer(cols = everything(), 
                names_to = "sample", values_to = "logCPM") %>% 
-  left_join(y$samples %>% 
-              mutate(sample = rownames(y$samples))) %>% 
+  left_join(
+    y$samples %>% 
+              mutate(sample = rownames(y$samples))
+    ) %>% 
+  arrange(disease) %>% 
+  mutate(
+    sample = str_remove(sample, pattern = "cluster"), 
+    sample = fct_inorder(sample)
+    
+  ) %>% 
   ggplot(
     aes(x = sample, y = logCPM)
     ) +
@@ -293,7 +345,8 @@ y %>%
     aes(fill = disease),
     outlier.size = 0.5
                ) +
-  facet_wrap(~cluster, scales = "free")
+  facet_wrap(~cluster, scales = "free") +
+  easy_rotate_x_labels(angle = -45) +
   labs(title = "Distribution of logCPM values per sample",
        x = "Sample", y = "log2 CPM")
 ```
@@ -352,22 +405,20 @@ plot.pca.bycelltype = function(dge.object, celltype.vector) {
     ggtitle(celltype.vector)
 }
 
-plot.pca.bycelltype(dge.object = y, celltype.vector = "Astrocyte1")
-plot.pca.bycelltype(dge.object = y, celltype.vector = "Astrocyte2")
-plot.pca.bycelltype(dge.object = y, celltype.vector = "Microglia2")
-plot.pca.bycelltype(dge.object = y, celltype.vector = "Microglia1")
-plot.pca.bycelltype(dge.object = y, celltype.vector = "Neuron_Ex1")
-plot.pca.bycelltype(dge.object = y, celltype.vector = "Neuron_Ex2")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Astrocyte")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Microglia")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Neuron_Ex")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "Neuron_In")
 plot.pca.bycelltype(dge.object = y, celltype.vector = "Oligodendrocyte")
+plot.pca.bycelltype(dge.object = y, celltype.vector = "OPC")
 ```
-
-
-
-
 
 # DE analysis
 
-DE gene analysis was performed only on autosomal genes (to account for sex differences)
+DE gene analysis was performed only on autosomal genes (to account for sex differences) using edgeR. 
+
+Design and contrasts matrices were used to be able to perform pairwise contrasts between control and disease celltypes. 
+
 ```{r}
 # create a design matrix
 design <- model.matrix(~0 + disease_cluster, 
@@ -424,10 +475,7 @@ contrast_matrix <- makeContrasts(contrasts = contrast_strings, levels = design)
 
 # rename columns for readability
 colnames(contrast_matrix) <- gsub("disease_cluster", "", colnames(contrast_matrix))
-```
 
-## toptables
-```{r}
 toptables <- colnames(contrast_matrix) %>% 
   sapply(function(x) {
       glmQLFTest(fit, design, contrast=contrast_matrix[,x]) %>% 
@@ -471,7 +519,7 @@ volcano_data %>%
     aes(colour = DE)
     ) +
   scale_color_manual(values = c("grey50", "red")) +
-  facet_wrap(~coef) +
+  facet_wrap(~coef, nrow = 3) +
   geom_text(
     data = volcano_labels,
     aes(x = x, y = y, label = label),
@@ -505,13 +553,11 @@ toptables %>%
   scale_color_manual(values = c("grey50", "red"))
 ```
 
-This hasnt worked. 
-
 # enrichmenmt andlysis 
 ## CD pathways
 ```{r}
 cluster.gprofiler.results <- 
-  list.files(path = "data/results/adultchildsubtypes", 
+  list.files(path = "data/results/adultchildsubtypes v2", 
              pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
   set_names(
     str_replace(., 
@@ -519,29 +565,49 @@ cluster.gprofiler.results <-
                 replacement = ""
     ) %>% 
       str_remove(
-        pattern = paste0("data/results/adultchildsubtypes", "/")
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
       )
   ) %>%   
   map(read.csv) %>%
   imap(~ mutate(.x, comparison = .y))
 
-network.genes.cluster <- cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
-  dplyr::select(Cluster, genes) %>% 
-  mutate(genes = str_split(genes, " ")) %>% 
-  deframe()
+# extract only PD and DLB networks. 
+cluster.gprofiler.results <- cluster.gprofiler.results[
+  names(cluster.gprofiler.results) %>% 
+  grepl(pattern = "lyso_[PD|DLB]")
+]
 
-network.genes.cluster %<>% 
+
+network.genes.cluster <- cluster.gprofiler.results %>% 
   lapply(function(x) {
-    x[x %in% rownames(y)]
+    x %>% 
+      dplyr::select(Cluster, genes) %>% 
+      mutate(genes = str_split(genes, " ")) %>% 
+      deframe()
   })
 
-# only retain clusters if they have more than 2 genes
-network.genes.cluster <- 
-  network.genes.cluster[lapply(network.genes.cluster, length) > 2]
+network.genes.cluster$CD_1A_lyso_DLB %<>% 
+  lapply(function(x) 
+  {
+    x[x %in% rownames(y)] %>% 
+      .[length(.) > 2] 
+  }
+  ) %>% 
+  compact() # omit any empty slots
+
+network.genes.cluster$CD_1A_lyso_PD %<>% 
+  lapply(function(x) 
+  {
+    x[x %in% rownames(y)] %>% 
+      .[length(.) > 2]
+  }
+  ) %>% 
+  compact()
+
   
 ### obtain the genes in the subnetworks
 node_metadata <- 
-  list.files(path = "data/results/adultchildsubtypes", 
+  list.files(path = "data/results/adultchildsubtypes v2", 
              pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
   set_names(
     str_replace(., 
@@ -549,17 +615,23 @@ node_metadata <-
                 replacement = ""
     ) %>% 
       str_remove(
-        pattern = paste0("data/results/adultchildsubtypes", "/")
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
       )
   ) %>%   
   map(read.csv) %>%
   imap(~ mutate(.x, comparison = .y))
-
-network.genes <- node_metadata$CD_1A_lyso_DLB
 ```
 
 # how many network genes are DE?
 ```{r}
+## how many network genes are detected
+n.net.genes.detect.DLB = toptables$`DLB_Microglia - Control_Microglia`$gene %in% node_metadata$CD_1A_lyso_DLB$X %>% summary %>% .[3] 
+
+n.net.genes.detect.PD = toptables$`PD_Microglia - Control_Microglia`$gene %in% node_metadata$CD_1A_lyso_PD$X %>% summary %>% .[3] 
+
+
+
+
 toptables[grepl(names(toptables), pattern = "DLB")] %>% 
   bind_rows() %>% 
   dplyr::filter(
@@ -567,12 +639,13 @@ toptables[grepl(names(toptables), pattern = "DLB")] %>%
     gene %in% node_metadata$CD_1A_lyso_DLB$X
     ) %>% 
   dplyr::select(!starts_with("vf")) %>% 
+  
   ggplot(
     aes(y = coef)
   ) +
   geom_bar() +
   labs(
-    title = "Number of DE genes in DLB network"
+    title = "Number Lyso_DLB subnetwork genes which are DE in DLB brain cells"
   ) +
 
 toptables[grepl(names(toptables), pattern = "PD")] %>% 
@@ -585,113 +658,97 @@ toptables[grepl(names(toptables), pattern = "PD")] %>%
   ggplot(
     aes(y = coef)
   ) +
-  geom_bar() +
+  geom_bar(
+  ) +
   labs(
-    title = "Number of DE genes in PD network"
+    title = "Number Lyso_PD subnetwork genes which are DE in PD brain cells"
   )
-
 ```
 
+Two particularly important genes in the network, NPC1 and GBA, have high absolute logFC and high centrality (z_both) in inhibitory neurons in DLB vs control brains.
 
 ```{r}
-net.genes.DE <- toptables[grepl(names(toptables), pattern = "DLB")] %>% 
-  bind_rows() %>% 
-  dplyr::filter(DE == T) %>% 
-  dplyr::filter(gene %in% network.genes$X) %>% 
-  .$gene %>% unique
-
-toptables %>% 
-  bind_rows() %>% 
+toptables$`DLB_Neuron_In - Control_Neuron_In` %>% 
   dplyr::filter(
-    gene %in% net.genes.DE, 
-    grepl(coef, pattern = "DLB")
+    gene %in% node_metadata$CD_1A_lyso_DLB$X, 
+    DE == TRUE
     ) %>% 
-  tidyHeatmap::heatmap(
-    .row = gene, 
-    .column = coef, 
-    .value = logFC,
-    
-    palette_value = circlize::colorRamp2(
-      seq(-5, 5, length.out = 11), 
-      rev(RColorBrewer::brewer.pal(11, "RdBu"))
-    )
-  ) %>% 
-  layer_text(
-    FDR < 0.05, .value = "*"
-  )
-  
-y %>% 
-  cpm(log=T) %>% 
-  .[net.genes.DE,] %>% 
-  as.data.frame() %>% 
-  rownames_to_column("gene") %>% 
-  pivot_longer(
-    names_to = "sample_cluster", 
-    values_to = "logCPM", 
-    colnames(y)
-    ) %>% 
-  left_join(rownames_to_column(y$samples, 
-                               "sample_cluster")) %>% 
-  dplyr::filter(disease %in% c("Control", "DLB")) %>% 
+  left_join( node_metadata$CD_1A_lyso_DLB %>% 
+               dplyr::rename(gene = X)) %>% 
   ggplot(
-    aes(x = cluster, y = logCPM, fill = disease)
+    aes(x = z_both, y = abs(logFC))
   ) +
-  #geom_jitter() +
-  geom_boxplot() +
-  facet_wrap(~gene, scales = "free_y") +
-  easy_rotate_x_labels(angle = -45) +
-  theme(
-    text = element_text(size = 18) 
-    )
+  geom_point(
+    aes(fill = -log10(PValue))
+  ) +
+  geom_label_repel(
+    aes(label = gene), 
+    # data = . %>% 
+    #   dplyr::filter(z_both > 10)
+  )  +
+  scale_fill_viridis_c() +
+  labs(
+    title= "LysoDLB FC vs network proximity in NeuronIn"
+  )
+```
 
+There are much less DE network genes in the PD and PDD nuclei transcriptomes No clear trends. 
+
+```{r}
+toptables$`PDD_Microglia - Control_Microglia` %>% 
+  bind_rows(toptables$`PD_Microglia - Control_Microglia`) %>% 
+  dplyr::filter(
+    gene %in% node_metadata$CD_1A_lyso_PD$X, 
+    DE == TRUE
+    ) %>% 
+  left_join( node_metadata$CD_1A_lyso_PD %>% 
+               dplyr::rename(gene = X)) %>% 
+  ggplot(
+    aes(x = z_both, y = abs(logFC))
+  ) +
+  geom_point(
+    aes(colour =-log10(PValue))
+  ) +
+  geom_label_repel(
+    aes(label = gene)
+  ) +
+  facet_wrap(~coef) +
+  scale_colour_viridis_c()
 ```
 
 
 # Over representation analysis
-## ORA of KEGG pathways within clusters
-```{r}
-ORA.clusters <- network.genes.cluster %>% 
-  lapply(function(x) {
-    clusterProfiler::enrichKEGG(
-      gene = bitr(x, 
-                  OrgDb = org.Hs.eg.db,
-                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
-      keyType = "ncbi-geneid", 
-      organism = "hsa"
-    ) 
-    })
-```
+
 
 #### number of DE genes per cluster
 ```{r}
-ora.DEG.in.clusters <- toptables %>%
+#ora.DEG.in.clusters <-
+  toptables %>%
   lapply(function(x) {
     genes <- x %>%
       dplyr::filter(DE == TRUE) %>%
       pull(gene)
-    
-    if (length(genes) < 5) return(NULL)  # skip if too few genes
-    
+
     clusterProfiler::enricher(
       gene = genes,
-      TERM2GENE = network.genes.cluster %>%
+      TERM2GENE = network.genes.cluster$CD_1A_lyso_DLB %>%
         enframe(name = "TERM", value = "GENE") %>%
-        unnest(cols = "GENE"), 
+        unnest(cols = "GENE"),
       universe = x$gene
     )
-  }) %>%
-  purrr::compact() 
+  })
+  purrr::compact()
 
-ora.DEG.in.clusters %>% 
-  lapply(as_tibble) %>% 
+ora.DEG.in.clusters %>%
+  lapply(as_tibble) %>%
   bind_rows(.id = "comparison")
 
-keep = toptables %>% 
-  bind_rows() %>% 
+keep = toptables %>%
+  bind_rows() %>%
   dplyr::filter(
     gene %in% network.genes.cluster$C438
-  ) %>% 
-  dplyr::filter(DE == T) %>% 
+  ) %>%
+  dplyr::filter(DE == T) %>%
   .$gene
 
   # Build the FDR matrix (for asterisk overlay)
@@ -712,8 +769,8 @@ Heatmap(
     column_to_rownames("coef") %>%
     as.matrix(),
   name = "logFC",
-  col = brewer_pal(palette = "RdBu")(7), 
-  
+  col = brewer_pal(palette = "RdBu")(7),
+
   cell_fun =function(j, i, x, y, width, height, fill) {
       # j = column index, i = row index
       # x, y = coordinates of the center of the cell
@@ -734,164 +791,131 @@ Heatmap(
 )
 
 
-```
 
+
+<!-- ```{r} -->
+<!-- #plot number of DE genes per cluster -->
+<!-- network.genes.cluster %>%  -->
+<!--   lapply(function(x) { -->
+<!--     tibble( -->
+<!--       gene = x -->
+<!--     ) %>%  -->
+<!--       left_join(toptables %>%  -->
+<!--                   bind_rows() %>%  -->
+<!--                   dplyr::select(gene, coef, FDR) %>%  -->
+<!--                   mutate(DE = FDR < 0.05),  -->
+<!--                 by = "gene" -->
+<!--       ) -->
+<!--   }) %>%  -->
+<!--   bind_rows(.id = "cluster") %>%  -->
+<!--   dplyr::filter(DE == T) %>%  -->
+<!--   mutate( -->
+<!--     celltype = str_extract( -->
+<!--       coef, -->
+<!--       pattern = "(?<=DLB_).+(?= - Control_)")) %>%  -->
+<!--  count(cluster, celltype, name = "num_DE_genes") %>% -->
+<!--   ggplot(aes(x = cluster, y = num_DE_genes, fill = celltype)) + -->
+<!--   geom_col(position = "dodge") + -->
+<!--   labs( -->
+<!--     title = "Number of DE genes (FDR < 0.05)", -->
+<!--     x = "Network cluster", -->
+<!--     y = "# DE genes" -->
+<!--   ) + -->
+<!--   scale_y_continuous(breaks = 0:12) + -->
+<!--   theme(axis.text.x = element_text(angle = 45, hjust = 1)) -->
+<!-- ``` -->
+
+
+
+<!-- ```{r} -->
+
+
+<!-- } -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- plot.cnet( -->
+<!--   toptable = toptables$`DLB_astrocyte - Control_astrocyte`, -->
+<!--   ORA.cluster.object = ORA.clusters$C453,  -->
+<!--   plot.title = "Astrocytes") -->
+
+<!-- plot.cnet( -->
+<!--   toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`, -->
+<!--   ORA.cluster.object = ORA.clusters$C439,  -->
+<!--   plot.title = "Microglia") -->
+
+<!-- plot.cnet( -->
+<!--   toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`, -->
+<!--   ORA.cluster.object = ORA.clusters$C448,  -->
+<!--   plot.title = "Microglia") -->
+
+<!-- plot.cnet( -->
+<!--   toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`, -->
+<!--   ORA.cluster.object = ORA.clusters$C438,  -->
+<!--   plot.title = "Microglia") -->
+<!-- ``` -->
+
+
+
+
+
+<!-- ```{r} -->
+<!-- plot.cnet( -->
+<!--   toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`, -->
+<!--   ORA.cluster.object = ORA.clusters$C441,  -->
+<!--   plot.title = "inhib neurons") -->
+
+<!-- plot.cnet( -->
+<!--   toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`, -->
+<!--   ORA.cluster.object = ORA.clusters$C440,  -->
+<!--   plot.title = "inhib neurons") -->
+<!-- ``` -->
+
+<!-- ## ORA of KEGG pathways -->
+<!-- ```{r} -->
+<!-- ora.DEG.KEGG <- toptables %>% -->
+<!--   lapply(function(x) { -->
+<!--     genes <- x %>% -->
+<!--       dplyr::filter(DE == TRUE) %>% -->
+<!--       pull(gene) -->
+
+<!--     if (length(genes) < 5) return(NULL)  # skip if too few genes -->
+
+<!--     clusterProfiler::enrichKEGG( -->
+<!--       gene = bitr(genes,  -->
+<!--                   OrgDb = org.Hs.eg.db, -->
+<!--                   fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID, -->
+<!--       universe = bitr(x$gene,  -->
+<!--                   OrgDb = org.Hs.eg.db, -->
+<!--                   fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID, -->
+<!--       keyType = "ncbi-geneid",  -->
+<!--       organism = "hsa")  -->
+<!--   }) %>% -->
+<!--   purrr::compact()  -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- ora.DEG.KEGG %>% -->
+<!--   lapply(as_tibble) %>%  -->
+<!--   bind_rows(.id = "coef") %>%  -->
+<!--   dplyr::filter(Count > 1) %>%  -->
+<!--   ggplot( -->
+<!--     aes(x = -log10(pvalue), y = Description) -->
+<!--   ) +  -->
+<!--   geom_col() + -->
+<!--   facet_wrap(~coef, scales = "free_y") -->
+<!-- ``` -->
+```
 
 
 ```{r}
-#plot number of DE genes per cluster
-network.genes.cluster %>% 
-  lapply(function(x) {
-    tibble(
-      gene = x
-    ) %>% 
-      left_join(toptables %>% 
-                  bind_rows() %>% 
-                  dplyr::select(gene, coef, FDR) %>% 
-                  mutate(DE = FDR < 0.05), 
-                by = "gene"
-      )
-  }) %>% 
-  bind_rows(.id = "cluster") %>% 
-  dplyr::filter(DE == T) %>% 
-  mutate(
-    celltype = str_extract(
-      coef,
-      pattern = "(?<=DLB_).+(?= - Control_)")) %>% 
- count(cluster, celltype, name = "num_DE_genes") %>%
-  ggplot(aes(x = cluster, y = num_DE_genes, fill = celltype)) +
-  geom_col(position = "dodge") +
-  labs(
-    title = "Number of DE genes (FDR < 0.05)",
-    x = "Network cluster",
-    y = "# DE genes"
-  ) +
-  scale_y_continuous(breaks = 0:12) +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-```
-
-
-
-```{r}
-plot.cnet = function(toptable, plot.title, ORA.cluster.object) {
-  # 1. Get toptable for the cluster you're plotting
-top.genes <- toptable %>%
-  # dplyr::filter(PValue < 0.05) %>% 
-  dplyr::select(gene, logFC)
-
-# 2. Map gene symbols to ENTREZID
-fc.entrez <- bitr(
-  top.genes$gene,
-  fromType = "SYMBOL",
-  toType = "ENTREZID",
-  OrgDb = org.Hs.eg.db
-) %>%
-  left_join(top.genes, by = c("SYMBOL" = "gene")) %>%
-  dplyr::distinct(ENTREZID, .keep_all = TRUE) %>%
-  dplyr::select(-SYMBOL) %>% 
-  deframe()  # named vector: names are ENTREZID, values are logFC
-
-cnetplot(
-  x = setReadable(ORA.cluster.object, 
-                  OrgDb = org.Hs.eg.db, keyType = "ENTREZID"),
-  foldChange = fc.entrez,
-  showCategory = 20,
-  circular = FALSE,
-  color_category='grey20', size_category = 0.5,
-  color_item = "grey90", 
-  colorEdge = F
-) +
-  scale_color_gradient2(name='logFC', low='blue4', high='firebrick4') + 
-  ggtitle(plot.title)
-  
-}
-```
-
-```{r}
-plot.cnet(
-  toptable = toptables$`DLB_astrocyte - Control_astrocyte`,
-  ORA.cluster.object = ORA.clusters$C453, 
-  plot.title = "Astrocytes")
-
-plot.cnet(
-  toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`,
-  ORA.cluster.object = ORA.clusters$C439, 
-  plot.title = "Microglia")
-
-plot.cnet(
-  toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`,
-  ORA.cluster.object = ORA.clusters$C448, 
-  plot.title = "Microglia")
-
-plot.cnet(
-  toptable = toptables$`DLB_microglia_immune - Control_microglia_immune`,
-  ORA.cluster.object = ORA.clusters$C438, 
-  plot.title = "Microglia")
-```
-
-
-
-
-
-```{r}
-plot.cnet(
-  toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`,
-  ORA.cluster.object = ORA.clusters$C441, 
-  plot.title = "inhib neurons")
-
-plot.cnet(
-  toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`,
-  ORA.cluster.object = ORA.clusters$C440, 
-  plot.title = "inhib neurons")
-```
-
-## ORA of KEGG pathways
-```{r}
-ora.DEG.KEGG <- toptables %>%
-  lapply(function(x) {
-    genes <- x %>%
-      dplyr::filter(DE == TRUE) %>%
-      pull(gene)
-    
-    if (length(genes) < 5) return(NULL)  # skip if too few genes
-    
-    clusterProfiler::enrichKEGG(
-      gene = bitr(genes, 
-                  OrgDb = org.Hs.eg.db,
-                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
-      universe = bitr(x$gene, 
-                  OrgDb = org.Hs.eg.db,
-                  fromType="SYMBOL", toType="ENTREZID") %>% .$ENTREZID,
-      keyType = "ncbi-geneid", 
-      organism = "hsa") 
-  }) %>%
-  purrr::compact() 
-```
-
-```{r}
-ora.DEG.KEGG %>%
-  lapply(as_tibble) %>% 
-  bind_rows(.id = "coef") %>% 
-  dplyr::filter(Count > 1) %>% 
-  ggplot(
-    aes(x = -log10(pvalue), y = Description)
-  ) + 
-  geom_col() +
-  facet_wrap(~coef, scales = "free_y")
-```
-
-
-
-### fry gene set tests
+# fry gene set tests
 #### Obtain KEGG gene sets
-```{r}
-library(KEGGREST)
-
 ### obtain the pathway to entrez geneid link
-path2entrezgene  <- 
-  keggLink("pathway", "hsa") %>% 
+path2entrezgene  <-
+  keggLink("pathway", "hsa") %>%
   tibble(
-    pathway = ., 
+    pathway = .,
     entrez_gene_id = sub("hsa:", "", names(.))
     )
 
@@ -901,15 +925,15 @@ pathways <-
   tibble(pathway = names(.), description = .)
 
 # Use org.eg.db to obtain the conversion of entrez to gene symbol
-hsa_kegg_anno <- 
+hsa_kegg_anno <-
   path2entrezgene %>%
   mutate(
-    symbol = mapIds(org.Hs.eg.db , entrez_gene_id, 
+    symbol = mapIds(org.Hs.eg.db , entrez_gene_id,
                     "SYMBOL", "ENTREZID")
-  ) %>% 
+  ) %>%
   mutate(pathway = str_remove(pathway, pattern = "path:")) %>%
   left_join(pathways) %>%
-  dplyr::select(-entrez_gene_id) %>% 
+  dplyr::select(-entrez_gene_id) %>%
   dplyr::filter(
     symbol %in% (y$genes$gene)) %>%
   mutate(
@@ -929,307 +953,434 @@ KEGG <- KEGG[lapply(KEGG, length) > 3 ]
 ```
 
 #### Run FRY on network clusters
-```{r}
-fry <- colnames(contrast_matrix) %>% 
-  sapply(function(x) {
-   cpm(y, log = T)  %>% 
-      fry(
-        index = network.genes.cluster,
-        design = design, 
-        contrast = contrast_matrix[,x], 
-        sort = "directional"
-      ) %>% 
-      rownames_to_column("pathway") %>% 
-      as_tibble() %>% 
-      mutate(coef = x) %>% 
-      left_join(
-        cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
-          dplyr::select(pathway = Cluster, top.pathway.gprofiler = Top.pathway)
-      )
-  }, simplify = FALSE)
-```
 
-#### run FRY on KEGG pws
+I next want to assess the communities identified and whether they show significant changes to expression as a group.
+
 ```{r}
-fry.KEGG <- colnames(contrast_matrix) %>% 
+run.fry = function(disease, fry.index, cluster.gprofiler.results.object)
+{
+colnames(contrast_matrix) %>% 
+  grep(pattern = disease, value = TRUE) %>% 
   sapply(function(x) {
    cpm(y, log = T)  %>% 
       fry(
-        index = KEGG,
+        index = fry.index,
         design = design, 
         contrast = contrast_matrix[,x], 
         sort = "mixed"
       ) %>% 
       rownames_to_column("pathway") %>% 
       as_tibble() %>% 
-      mutate(coef = x)
-      
-  }, simplify = FALSE)
-```
-
-```{r}
-fry.KEGG %>% 
-  bind_rows() %>% 
-  dplyr::filter(FDR.Mixed < 0.05) %>% 
-  ggplot(
-    aes(x = coef, y = pathway, fill = -log10(PValue.Mixed))
-  ) +
-  geom_tile() 
-  facet_wrap(~coef, scales = "free")
-```
-
-```{r}
-
-pw.interest = c("Lysosome", "Sphingolipid metabolism", "Other glycan degradation" , "Glycosaminoglycan degradation","Phagosome", "Ferroptosis", "Mineral absorption", "Antigen processing and presentation", "Cholesterol metabolism" , "Starch and sucrose metabolism", "Sphingolipid signaling pathway", "Rheumatoid arthritis", "Synaptic vesicle cycle", "Galactose metabolism", "Allograft rejection", "Carbohydrate digestion and absorption", "Tuberculosis", "Porphyrin metabolism", "Type I diabetes mellitus", "Graft-versus-host disease", "Protein processing in endoplasmic reticulum", "Amino sugar and nucleotide sugar metabolism", "Autoimmune thyroid disease", "Viral myocarditis", "PPAR signaling pathway", "Salivary secretion")
-
-fry.KEGG %>% 
-  bind_rows() %>% 
-  dplyr::filter(pathway %in% pw.interest) %>% 
-  ggplot(
-    aes(x = -log10(FDR), y = pathway,
-        fill = Direction,
-        alpha = FDR < 0.05)
-  ) +
-  geom_col() + 
-  facet_wrap(~coef, nrow = 1) +
-  theme(
-    legend.position = "top"
-  )
-
-```
-
-
-
-### vis 
-#### which clusters are sig
-```{r}
-fry %>% 
-  bind_rows() %>% 
-  pivot_longer(
-    cols = c(PValue, PValue.Mixed),
-    names_to = "pval_type",
-    values_to = "pval"
-  ) %>%
-  mutate(
-    coef = str_extract(coef, 
-                         pattern = "(?<=DLB_).+(?= - Control_)"),
-    neglog10_p = -log10(pval),
-    pval_type = recode(pval_type, "PValue" = "Directional", "PValue.Mixed" = "Mixed"),
-    fdr = case_when(
-      pval_type == "Directional" ~ FDR,
-      pval_type == "Mixed" ~ FDR.Mixed
-    ),
-    sig = fdr < 0.05,
-    alpha_val = if_else(sig, 1, 0.3),
-    pathway = factor(pathway, levels = unique(pathway))
-  ) %>% 
-  ggplot(aes(x = pval_type,
-             y = pathway, fill = neglog10_p, alpha = alpha_val)) +
-  geom_tile() +
-  facet_wrap(~coef, nrow = 1) +
-  scale_fill_viridis_c(option = "plasma", name = "-log10(P)") +
-  scale_alpha(range = c(0.3, 1), guide = "none") +
-  labs(
-    x = "Hypothesis test",
-    y = "Netcoloc cluster"
-  ) 
-```
-
-#### network
-##### netcoloc cluster 436
-```{r}
-plot.cnet(
-  toptable = toptables$`DLB_neuron_inhib - Control_neuron_inhib`, 
-  ORA.cluster.object = ORA.clusters$C436, 
-  plot.title = "Cluster C436 in inhib neurons"
-  )
-
-plot.cnet(
-  toptable = toptables$`DLB_vascular - Control_vascular`, 
-  ORA.cluster.object = ORA.clusters$C436, 
-  plot.title = "Cluster C436 in vascular cells"
-  )
-
-
-```
-
-
-##### neurons
-```{r}
-# 1. Get toptable for the cluster you're plotting
-top.genes <- toptables$`DLB_neuron_inhib - Control_neuron_inhib` %>%
-  dplyr::select(gene, logFC)
-
-# 2. Map gene symbols to ENTREZID
-fc.entrez <- bitr(
-  top.genes$gene,
-  fromType = "SYMBOL",
-  toType = "ENTREZID",
-  OrgDb = org.Hs.eg.db
-) %>%
-  left_join(top.genes, by = c("SYMBOL" = "gene")) %>%
-  dplyr::distinct(ENTREZID, .keep_all = TRUE) %>%
-  dplyr::select(-SYMBOL) %>% 
-  deframe()  # named vector: names are ENTREZID, values are logFC
-
-cnetplot(
-  x = setReadable(ORA.clusters$C436, OrgDb = org.Hs.eg.db, keyType = "ENTREZID"),
-  foldChange = fc.entrez,
-  showCategory = 10,
-  circular = FALSE,
-  color_category='grey80', 
-  color_item = "grey90", 
-  colorEdge = TRUE
-) +
-  scale_color_gradient2(name='logFC', low='blue4', high='firebrick4') + 
-  ggtitle("Neuron network")
-```
-
-#### logCPM
-```{r}
-plot.logCPM = function(cluster.list, plot.title) {
-  
-    logcpm_mat <- y %>%
-    cpm(log = TRUE) %>%
-    .[cluster.list, , drop = FALSE]
-  
-    sample_meta <- y$samples[colnames(logcpm_mat), , drop = FALSE]
-    
- Heatmap(
-    matrix = logcpm_mat,
-    name = "logCPM",
-    top_annotation = HeatmapAnnotation(
-      celltype = sample_meta$cluster %>% droplevels(),
-      disease = sample_meta$disease %>% droplevels(),
-      col = list(
-        disease = c("Control" = "grey10", "DLB" = "red"), 
-        celltype = viridis_pal(option = "turbo")(8) %>% 
-          set_names(sample_meta$cluster %>% unique)
+      mutate(coef = x) %>% 
+      left_join(
+        cluster.gprofiler.results.object %>% 
+          dplyr::select(pathway = Cluster, top.pathway.gprofiler = Top.pathway)
       )
-    ),
-    
-    col = viridis_pal()(10),
-    column_split = sample_meta$cluster,
-    column_title = plot.title,
-    show_column_names = F,
-    show_row_names = T,
-    cluster_rows = TRUE,
-    cluster_columns = TRUE, 
-  )
+  }, simplify = FALSE)
 }
-
-plot.logCPM(cluster.list = network.genes.cluster$C453, 
-            plot.title = "C501: lysosomal lumen")
 ```
 
-#### logFC of DEGs
 ```{r}
-
-keep = toptables %>% 
-  bind_rows() %>% 
-  dplyr::filter(
-    gene %in% network.genes.cluster$C453
-  ) %>% 
-  dplyr::filter(DE == T) %>% 
-  .$gene
-
-  # Build the FDR matrix (for asterisk overlay)
-  FDR_mat <- toptables %>%
-    bind_rows() %>%
-    dplyr::filter(gene %in% net.genes.DE) %>%
-    dplyr::select(coef, gene, FDR) %>%
-    pivot_wider(names_from = gene, values_from = FDR) %>%
-    column_to_rownames("coef") %>%
-    as.matrix()
-
-Heatmap(
-  matrix = toptables %>%
-    bind_rows() %>%
-    dplyr::filter(gene %in% net.genes.DE) %>%
-    dplyr::select(coef, gene, logFC) %>%
-    pivot_wider(names_from = gene, values_from = logFC) %>%
-    column_to_rownames("coef") %>%
-    as.matrix(),
-  name = "logFC",
-  col = brewer_pal(palette = "RdBu")(7), 
+fry.results = list(
+  DLB = run.fry(
+    disease = "DLB", 
+    fry.index = network.genes.cluster$CD_1A_lyso_DLB,
+    cluster.gprofiler.results.object = cluster.gprofiler.results$CD_1A_lyso_DLB), 
   
-  cell_fun =function(j, i, x, y, width, height, fill) {
-      # j = column index, i = row index
-      # x, y = coordinates of the center of the cell
-      # width, height = size of the cell
-      # fill = background color (not used here)
-
-      # Check if the FDR value for this cell exists and is below 0.05
-      if (!is.na(FDR_mat[i, j]) && FDR_mat[i, j] < 0.05) {
-        # If yes, overlay a text label "*" on that cell
-        grid.text("*", x, y, gp = gpar(fontsize = 15))
-      }
-    },
-  column_names_gp = gpar(fontsize = 12),
-  show_row_names = TRUE,
-  show_column_names = TRUE,
-  cluster_rows = TRUE,
-  cluster_columns = TRUE
+  PD = run.fry(
+    disease = "PD", 
+    fry.index = network.genes.cluster$CD_1A_lyso_PD,
+    cluster.gprofiler.results.object = cluster.gprofiler.results$CD_1A_lyso_PD)
 )
 ```
 
+### Which clusters are sig?
+```{r}
+sig.clusters.DLB <- fry.results$DLB %>% 
+  bind_rows() %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>% 
+  .$pathway %>% 
+  unique
+
+fry.results$DLB %>% 
+  bind_rows() %>% 
+  dplyr::filter(pathway %in% sig.clusters.DLB) %>% 
+  pivot_longer(
+    cols = c(PValue, PValue.Mixed, FDR, FDR.Mixed),
+    names_to = c(".value", "Hypothesis"),
+    names_sep = "\\." # Splits 'PValue.Mixed' into 'PValue' and 'Mixed'
+  ) %>%  
+  mutate(
+    Hypothesis = replace_na(Hypothesis, replace = "Directional"), 
+    coef = str_remove(coef, pattern = " - Contro.+")
+  ) %>% 
+  ggplot(
+    aes(x = Hypothesis, y = pathway)
+  ) +
+  geom_tile(
+    aes(fill = -log10(PValue), 
+        alpha = FDR < 0.05), 
+    ) +
+  geom_label(
+    aes(label = signif(FDR, 2)), 
+    data = . %>% 
+      dplyr::filter(FDR < 0.05)
+  ) +
+  facet_wrap(~coef, nrow = 1) +
+  scale_fill_viridis_c()
+```
 
 ```{r}
-toptables$`DLB_microglia_immune - Control_microglia_immune` %>%
-  dplyr::filter(gene %in% network.genes.cluster$C436) %>% 
-  # dplyr::filter(FDR < 0.05) %>% 
-  dplyr::select(
-    gene, logFC, PValue, FDR, coef
-  ) %>% 
-  left_join(network.genes %>% 
-              dplyr::select(gene = X, z_d2, z_both)) %>% 
-  ggplot(
-    aes(x = -log10(PValue), y = z_d2)
-  ) +
-  geom_point() +
-  geom_label_repel(
-    aes(label= gene), 
-    data = . %>% 
-      dplyr::filter(
-        FDR < 0.1 & z_both > 5
-      )
-  )
+fry.results$DLB %>% 
+  bind_rows() %>% 
+  dplyr::filter(pathway %in% sig.clusters.DLB) %>% 
 
-toptables$`DLB_microglia_immune - Control_microglia_immune` %>%
-  dplyr::filter(gene %in% network.genes.cluster$C436) %>% 
-  # dplyr::filter(FDR < 0.05) %>% 
-  dplyr::select(
-    gene, logFC, PValue, FDR, coef
+  mutate(
+    coef = str_remove(coef, pattern = " - Contro.+")
   ) %>% 
-  left_join(network.genes %>% 
-              dplyr::select(gene = X, z_d2, z_both)) %>% 
   ggplot(
-    aes(x = logFC, y = z_both, colour = -log10(PValue))
+    aes(x = -log10(PValue.Mixed), y = pathway)
   ) +
-  geom_point() +
-  geom_label_repel(
-    aes(label= gene), 
-    data = . %>% 
-      dplyr::filter(
-        FDR < 0.05 & z_both > 5
-      )
-  )
+  geom_col(
+    aes(fill = Direction,
+        alpha = FDR.Mixed < 0.05), 
+    ) +
+  facet_wrap(~coef, nrow = 1) +
+  scale_fill_viridis_d()
 ```
+
+```{r}
+fry.results$DLB %>% 
+  bind_rows() %>% 
+  mutate(
+    coef = str_remove(coef, pattern = " - Contro.+")
+  ) %>% 
+  ggplot(
+    aes(
+      x = coef,
+      y = -log10(PValue.Mixed))
+  ) +
+  geom_point(
+    aes(
+      size = NGenes, 
+      colour = Direction)
+  ) +
+  geom_hline(yintercept = -log10(0.05)) +
+  geom_label_repel(
+    aes(label = pathway), 
+    data = . %>% 
+      dplyr::filter(FDR.Mixed < 0.05))
+```
+
+```{r}
+Idents(data.seurat) = data.seurat@meta.data$celltype
+```
+
+
+```{r}
+data.seurat %>% 
+  VlnPlot(features = network.genes.cluster$CD_1A_lyso_DLB$C441)
+
+```
+
+
+## DLB
+### Cluster 436
+#### expression of C436
+```{r}
+y[
+  # subset genes
+  network.genes.cluster$CD_1A_lyso_DLB$C436,
+  # subset samples
+  (y$samples %>% 
+     dplyr::filter(
+       disease %in% c("Control", "DLB")
+       ) %>% 
+     rownames)
+  ] %>% 
+  cpm(log=T) %>% 
+  Heatmap(
+    name = "logCPM",
+    top_annotation = HeatmapAnnotation(
+      disease = y$samples[colnames(.), "disease"] %>% droplevels(),
+      col = list(
+        disease = c("Control" = "grey50", "DLB" = "red")
+      )
+    ),
+    col = viridis_pal()(10),
+    column_split = y$samples[colnames(.), "cluster"] %>% droplevels(),
+    show_column_names = F,
+    show_row_names = T,
+    row_names_gp = gpar(fontsize = 5),
+    cluster_rows = TRUE,
+    cluster_columns = TRUE,  
+  )  %>% 
+  draw(column_title = "Lyso_DLB C436", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+  
+```
+#### lpofFC of genes in C436
+```{r}
+
+toptables[names(toptables) %>%
+  grep(
+    pattern = "DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  network.genes.cluster$CD_1A_lyso_DLB$C436
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-10, 0, 3), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_column_dend =  F, 
+    show_row_names = F,
+    show_column_names = TRUE,
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+    width = unit(4, "cm"), 
+    border_gp = gpar("black")
+    
+  ) %>% 
+   draw(column_title = "Lyso_DLB C436", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+```
+
+There are some genes with a low logFC in inhib nurons. 
+
+I wnt to have a closer look at these
+```{r}
+toptables[names(toptables) %>%
+  grep(
+    pattern = "DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  network.genes.cluster$CD_1A_lyso_DLB$C436
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  arrange(Neuron_In) %>% 
+  as.matrix() %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-10, 0, 5), c("blue4", "white", "red3")),
+    show_row_names = TRUE,
+    show_column_names = TRUE,
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+    width = unit(4, "cm")
+    
+  )   %>% 
+  .[1:46,]
+   draw(column_title = "Lyso_DLB C436", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+```
+
+Many of these are lysosomal enzymes.. 
+GBA, NAGLU, IDUA, MAN2B1. AGA , ACP2, HYAL1
+
+#### PD
+
+```{r}
+sig.clusters.PD <- fry.results$PD %>% 
+  bind_rows() %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>% 
+  .$pathway %>% 
+  unique
+
+fry.results$PD %>% 
+  bind_rows() %>% 
+  dplyr::filter(pathway %in% sig.clusters.PD) %>% 
+  mutate(
+    coef = str_remove(coef, pattern = " - Contro.+")
+  ) %>% 
+  ggplot(
+    aes(x = -log10(PValue.Mixed), 
+        y = pathway)
+  ) +
+  geom_col(
+    aes(fill = -log10(PValue.Mixed), 
+        alpha = FDR.Mixed < 0.05)
+  ) +
+  facet_wrap(~coef, nrow = 2) +
+  scale_fill_viridis_c()
+```
+#### expression of 289
+```{r}
+y[
+  # subset genes
+  network.genes.cluster$CD_1A_lyso_PD$C289,
+  # subset samples
+  (y$samples %>% 
+     dplyr::filter(
+       disease %in% c("Control", "PD", "PDD")
+       ) %>% 
+     rownames)
+  ] %>% 
+  cpm(log=T) %>% 
+  Heatmap(
+    name = "logCPM",
+    top_annotation = HeatmapAnnotation(
+      disease = y$samples[colnames(.), "disease"] %>% droplevels(),
+      col = list(
+        disease = c("Control" = "grey50", "PD" = "red", PDD = "red4")
+      )
+    ),
+    col = viridis_pal()(10),
+    column_split = y$samples[colnames(.), "cluster"] %>% droplevels(),
+    show_column_names = F,
+    show_row_names = T,
+    row_names_gp = gpar(fontsize = 5),
+    cluster_rows = TRUE,
+    cluster_columns = TRUE,  
+  )  %>% 
+  draw(column_title = "Lyso_PD C289", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+  
+```
+#### logFC of genes in C290
+```{r}
+toptables[names(toptables) %>%
+  grep(
+    pattern = "PD", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  network.genes.cluster$CD_1A_lyso_PD$C290
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>%
+  Heatmap(
+    name = "logFC",
+    
+    col = colorRamp2(c(-2, 0, 2), c("blue4", "white", "red3")),
+    
+    top_annotation = HeatmapAnnotation(
+      disease =   colnames(.) %>% 
+        as.data.frame() %>% 
+        set_colnames("coef") %>% 
+        mutate(disease = str_extract(coef, pattern = "PDD|PD")) %>% 
+        column_to_rownames("coef") %>% 
+        .$disease, 
+       col = list(
+        disease = c("PD" = "red", PDD = "red4")
+      ), 
+      show_legend = F
+      ),
+    
+    show_row_names = T,
+    show_column_names = TRUE,
+    show_column_dend = F, 
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+    
+    row_names_gp= gpar(fontsize = 8),
+    width = unit(4, "cm")
+    
+  ) %>% 
+   draw(column_title = "Lyso_PD C251", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+```
+
+## shared genes across the 2 similar clusters
+
+PD_C251 is the most simialr to DLB_C436. 
+
+```{r}
+toptables[names(toptables) %>%
+  grep(
+    pattern = "PD|DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  intersect(
+      network.genes.cluster$CD_1A_lyso_PD$C251,
+      network.genes.cluster$CD_1A_lyso_DLB$C436
+      )
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  # mutate(
+  #   coef = str_remove(coef, "DLB_"), 
+  #   coef = str_remove(coef, "PD._")
+  # ) 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>%
+  Heatmap(
+    name = "logFC",
+    
+    col = colorRamp2(c(-2, 0, 2), c("blue4", "white", "red3")),
+    
+    top_annotation = HeatmapAnnotation(
+      disease =   colnames(.) %>% 
+        as.data.frame() %>% 
+        set_colnames("coef") %>% 
+        mutate(disease = str_extract(coef, pattern = "PDD|PD|DLB")) %>% 
+        column_to_rownames("coef") %>% 
+        .$disease, 
+       col = list(
+        disease = c("PD" = "red", PDD = "red4", DLB = "pink")
+      ), 
+      show_legend = T
+      ),
+    
+    column_split = colnames(.) %>% 
+        as.data.frame() %>% 
+        set_colnames("coef") %>% 
+        mutate(celltype = str_remove(coef, pattern = "^.+_")) %>% 
+        column_to_rownames("coef") %>% 
+        .$celltype,
+    
+    show_row_names = T,
+    show_column_names = TRUE,
+    show_column_dend = F, 
+    cluster_rows = TRUE,
+    cluster_columns = F, 
+    
+    row_names_gp= gpar(fontsize = 8),
+    width = unit(20, "cm")
+    
+  ) %>% 
+  draw(column_title = "shared C436 and C251 genes", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+```
+
 
 # data export
 ```{r}
-
-
 y %>% 
   qsave("data/public data/GSE178146_RAW/R_objects/pseudobulk_dgeObject.qs")
 
-ORA.clusters %>% 
-  qsave("data/public data/GSE178146_RAW/R_objects/ORA_clusters.qs")
 
-ora.DEG.in.clusters %>% 
-  qsave("data/public data/GSE178146_RAW/R_objects/ORA_DEGs_clusters.qs")
-
-fry %>% 
+fry.results %>% 
   qsave("data/public data/GSE178146_RAW/R_objects/fry_results.qs")
 
 toptables %>% 
@@ -1238,9 +1389,11 @@ toptables %>%
 
 
 # figs
-
-## Which cell types are the network genes expressed in?
+## seurat 
 ```{r}
+# SET THE IDEMTS TO CELLTYPE
+Idents(data.seurat) = data.seurat@meta.data$celltype
+# extract the network genems
 network.genes <- node_metadata[
   node_metadata %>% names %>% grepl(pattern = "CD_1A")
 ] %>% 
@@ -1251,7 +1404,271 @@ network.genes <- node_metadata[
   }) %>% 
   set_names(str_remove(names(.), pattern = "CD_1A_lyso_"))
 
+# cell type marker genes
+genes2plot = c(
+  # inhib neurons
+  "GAD1","GAD2", 
+  # exc neurons
+  "CAMK2A","NRGN", "SLC17A7", 
+  # astrocytes
+  "GFAP","AQP4", 
+  # microglia
+  "C3","CD74", "CSF1R", "AIF1",
+  # OPCs
+  "OLIG1","OLIG2",
+  # oligodend
+  "MBP","MOBP", "PLP1", 
+  # VLMCs
+  "COL1A2","DCN", "IGFBP7",
+  # endo
+  "CLDN5","FLT1"
+  )
 
+sig.clusters.DLB <- fry.results$DLB %>% 
+  bind_rows() %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>% 
+  .$pathway %>% 
+  unique
+
+
+# assemble th eplot  
+fig4a <- Seurat::DimPlot(data.seurat,
+        reduction = "umap",
+        label = TRUE,
+        repel = TRUE,
+        group.by = "celltype",
+        split.by = "disease",
+        shuffle = TRUE
+        ) +
+  theme(
+    legend.position = "none", 
+    aspect.ratio = 1
+  ) 
+
+
+fig4b <-  
+  Seurat::DotPlot(
+    data.seurat,
+    features = genes2plot,
+    cols = c("#440154FF", "#22A884FF"), 
+    scale = TRUE, 
+    dot.scale = 10
+  ) +
+  labs(
+    y = "Cell type", 
+    x = "Genes"
+  ) +
+  scale_fill_viridis_c()
+
+
+fig.4c <- fry.results$DLB %>% 
+  bind_rows() %>% 
+  dplyr::filter(pathway %in% sig.clusters.DLB) %>% 
+  mutate(
+    coef = str_remove(coef, pattern = " - Con.+$"),
+    coef = str_remove(coef, pattern = "DLB_")
+  ) %>% 
+  ggplot(
+    aes( 
+      x = coef, 
+      y = pathway)
+  ) +
+  geom_tile(
+    aes(fill = -log10(PValue.Mixed)), 
+    width = 1
+  ) + 
+  geom_label(
+    aes(label = signif(FDR.Mixed, 2))
+  ) +
+  scale_fill_viridis_c() +
+  scale_alpha_manual(
+    values = c(0.2, 1)
+  ) +
+  labs(
+    y = "LysoDLB community",
+    x = "Cell type"
+  ) 
+
+fig4a + fig4b + fig.4c +
+  theme(
+    text = element_text(size = 14)
+  )
+  
+  ggsave("output/figs/paper/fig4abc.png",
+         width = 19, height = 11, units = "cm", 
+         scale = 2.5)
+  
+  
+```
+
+## logFC of genes in clusters
+```{r}
+gene_annot <- tibble(
+  gene =  colnames(t(mat)),
+  C437 = gene %in% network.genes.cluster$CD_1A_lyso_DLB$C437,
+  C438 = gene %in% network.genes.cluster$CD_1A_lyso_DLB$C438
+)
+
+mat = 
+  toptables[names(toptables) %>%
+  grep(
+    pattern = "DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  network.genes.cluster$CD_1A_lyso_DLB$C436
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t 
+
+mat %>% 
+  t %>%
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-4, 0, 4), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_column_dend =  F, 
+    show_row_names = F,
+    show_column_names = T,
+    column_names_gp = gpar(fontsize = 12),
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+    width = unit(4, "cm"), 
+    border_gp = gpar("black"), 
+    
+    left_annotation =  rowAnnotation(
+      # C437 = colnames(mat) %in%
+      #   network.genes.cluster$CD_1A_lyso_DLB$C437 ,
+      # C438 = colnames(mat) %in%
+      #   network.genes.cluster$CD_1A_lyso_DLB$C438,
+      lysosome = colnames(mat) %in%
+        KEGG$Lysosome,
+      sphingolipid = colnames(mat) %in%
+        KEGG$`Sphingolipid metabolism`,
+      col = list(
+        lysosome = c("TRUE" = "red", "FALSE" = "grey70"),
+        sphingolipid = c("TRUE" = "red", "FALSE" = "grey70")
+      ),
+      annotation_name_gp = gpar(fontsize = 10)
+    )
+  ) 
+  .[307:250,]
+
+C436_clusterprofiler <- network.genes.cluster$CD_1A_lyso_DLB$C436 %>% 
+  bitr(toType = "ENTREZID", fromType = "SYMBOL", OrgDb = org.Hs.eg.db) %>% 
+  .$ENTREZID %>% 
+  enrichKEGG(
+    organism = "hsa", 
+    universe = rownames(y) %>% 
+       bitr(toType = "ENTREZID", fromType = "SYMBOL", OrgDb = org.Hs.eg.db)
+    )%>% 
+  setReadable(OrgDb = org.Hs.eg.db, keyType = "ENTREZID")
+
+C436_clusterprofiler %>% 
+  as_tibble() %>% view
+  .$Description
+
+
+cnetplot(
+  C436_clusterprofiler, 
+  showCategory = 28, 
+  foldChange = 
+    toptables$`DLB_Microglia - Control_Microglia`%>% 
+    dplyr::select(gene, logFC) %>% 
+    dplyr::distinct(gene,.keep_all = T) %>%
+    { setNames(.$logFC, .$gene) }, 
+  color_item = "white"
+) +
+  scale_color_gradient2(
+    name='associated data', low='darkblue', high='firebrick', na.value = "white")
+
+
+
+hm.437 <- toptables[names(toptables) %>%
+  grep(
+    pattern = "DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  network.genes.cluster$CD_1A_lyso_DLB$C437
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-5, 0, 5), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_column_dend =  F, 
+    show_row_names = T,
+    show_column_names = F,
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+    height = unit(4, "cm"), 
+    border_gp = gpar("black")
+    
+  )
+
+hm.438 <- toptables[names(toptables) %>%
+  grep(
+    pattern = "DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  network.genes.cluster$CD_1A_lyso_DLB$C438
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-5, 0, 5), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_column_dend =  F, 
+    show_row_names = F,
+    show_column_names = TRUE,
+    cluster_rows = TRUE,
+    cluster_columns = TRUE, 
+    width = unit(4, "cm"), 
+    border_gp = gpar("black")
+    
+  )
+
+hm.436 %v% hm.437 %v% hm.438
+
+draw(column_title = "Lyso_DLB C437", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))
+```
+
+```{r}
+
+```
+
+
+
+```{r}
 # violin plot to show the expression of network genes across celltypes
 plot.network.genes.across.celltypes = function(
   network.genes, 
@@ -1259,11 +1676,11 @@ plot.network.genes.across.celltypes = function(
   ggtitle
   ){
 y %>% 
-  cpm(log = T) %>% 
+  cpm(log = F) %>% 
   as_tibble(rownames = "gene_name") %>% 
   pivot_longer(
     names_to = "sample_id", 
-    values_to = "logCPM", 
+    values_to = "CPM", 
     colnames(y)
   ) %>% 
   left_join(y$samples) %>% 
@@ -1272,14 +1689,17 @@ y %>%
     disease %in% disease.object
   ) %>% 
   ggplot(
-    aes(y = logCPM, x = disease, colour = disease)
+    aes(y = CPM, x = disease, colour = disease)
   ) +
   geom_violin() +
   geom_boxplot(
-    width = 0.2, 
+    width = 0.2, outliers = F,
     position = position_dodge(width = 1)
   ) +
   facet_wrap(~cluster, scales = "free_x", nrow = 1) +
+    scale_y_continuous(
+      labels = comma
+    ) +
   labs(
     title = ggtitle
   ) +
@@ -1304,8 +1724,65 @@ plot.network.genes.across.celltypes(
     values = viridis_pal(begin = 0.1, end = 0.5)(3)
     ) , 
 
-ncol = 1
-)
+ncol = 1, align = "h"
+) 
+
+## now plot the proportion of the network genes expressed
+y$samples %>% 
+  dplyr::filter(
+    disease %in% c("Control", "DLB")
+  ) %>% 
+  left_join(
+    y.before.removing.clusters %>% 
+      cpm(log = F) %>% 
+      as_tibble(rownames = "gene_name") %>% 
+      pivot_longer(
+        names_to = "sample_id", 
+        values_to = "CPM", 
+        colnames(y)
+      ) %>% 
+      dplyr::filter(
+        gene_name %in% network.genes$DLB$gene_name
+      ) %>% 
+    mutate(
+      expressed = CPM > 0
+    ) %>% 
+      group_by(sample_id, expressed) %>% 
+      summarise(
+        num_genes = n(),
+        .groups = "drop"
+      ) %>% 
+      pivot_wider(
+        names_from = expressed,
+        values_from = num_genes,
+        names_prefix = "expressed_"
+      ) %>% 
+      mutate(
+        expressed_Fraction = expressed_TRUE / (expressed_TRUE + expressed_FALSE)
+      ),
+    by = "sample_id"
+  ) %>% 
+  group_by(cluster, disease) %>% 
+  summarise(
+    mean_expressed_Fraction = mean(expressed_Fraction, na.rm = T),
+    .groups = "drop"
+      ) %>% 
+  ggplot(
+    aes(x = cluster, y = mean_expressed_Fraction, fill = disease)
+  ) +
+  geom_col(position = "dodge") +
+  labs(
+    title = "Proportion of network genes expressed (CPM > 1)",
+    y = "Proportion of genes expressed",
+    x = "Cell type"
+  ) +
+  scale_y_continuous(
+    limits = c(0,1),
+    labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_viridis_d() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
 
 ```
 
@@ -1428,6 +1905,13 @@ ggsave(
     scale = 2.5)
 ```
 
+## Pld3
+```{r}
+toptables %>% 
+  bind_rows() %>% 
+  dplyr::filter(gene == "GABARAP") %>% 
+  arrange(FDR)
+```
 
 
 

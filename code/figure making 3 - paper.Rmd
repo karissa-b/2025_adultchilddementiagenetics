@@ -1,0 +1,1095 @@
+---
+title: "figure making 3 - paper"
+author: "Karissa Barthelson"
+date: "`r Sys.Date()`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F)
+```
+```{r}
+library(tidyverse)
+library(magrittr)
+
+library(Seurat)
+
+
+library(ggpubr)
+```
+
+# Figure 4 - scRNAseq
+
+```{r}
+# seurat objects
+seurat.object.paths = list.files(
+  path = "data/public data", 
+  pattern = "seurat",
+  recursive = T,  full.names = T
+  )
+
+seurat_objects = list(
+  human_DLB_PD = qread(
+    file = grep(seurat.object.paths, pattern = "PD_DLB_data_seurat", value = T)
+    ), 
+  mouse_Npc1 = qread(
+    file = grep(seurat.object.paths, pattern = "NPC_mousebrain", value = T)
+    )
+  # mouse_Twi = qread(
+  #   file = grep(seurat.object.paths, pattern = "twiMice", value = T)
+  #   )
+)
+
+
+
+```
+
+## a and b - dimplots
+```{r}
+f4.AB = ggarrange(
+  DimPlot(seurat_objects$human_DLB_PD, 
+          group.by = "celltype",
+          label = T) +
+    theme(
+      legend.position = "none", 
+      plot.subtitle =  element_text(hjust = 0.5),
+      aspect.ratio = 1
+    )  +
+    labs(
+      title = "Human anterior cingulate cortex", 
+      subtitle = "Control, PD, PDD and DLB"),
+  
+  DimPlot(seurat_objects$mouse_Npc1, group.by = "celltype", 
+          label = T) +
+    theme(
+      legend.position = "none", 
+      plot.subtitle =  element_text(hjust = 0.5),
+      aspect.ratio = 1
+    )  +
+    labs(
+      title = "Mouse cerebellum", 
+      subtitle = "Npc1-/- and WT"),
+  
+widths = c(2,1.2), nrow = 1
+) 
+
+f4.AB        
+```
+## c - human cell type markers.
+```{r}
+# SET THE IDEMTS TO CELLTYPE
+Idents(seurat_objects$human_DLB_PD) = seurat_objects$human_DLB_PD@meta.data$celltype
+
+# extract the network genes
+network.genes <- node_metadata[
+  node_metadata %>% names %>% grepl(pattern = "CD_1A")
+] %>% 
+  lapply(function(x) {
+    tibble(
+      gene_name = x$X
+    )
+  }) %>% 
+  set_names(str_remove(names(.), pattern = "CD_1A_lyso_"))
+
+# cell type marker genes
+genes2plot = c(
+    # oligodend
+  "MBP","MOBP",
+    # exc neurons
+  "CAMK2A","NRGN", 
+    # OPCs
+  "OLIG1","OLIG2",
+  # inhib neurons
+  "GAD1","GAD2", 
+
+  # astrocytes
+  "GFAP","AQP4", 
+  # microglia
+  "C3", "AIF1"
+
+
+  # # VLMCs
+  # "COL1A2","DCN", "IGFBP7",
+  # # endo
+  # "CLDN5","FLT1"
+  )
+
+
+
+f4c <-  
+  Seurat::DoHeatmap(
+    seurat_objects$human_DLB_PD %>% 
+      subset(idents = seurat_objects$human_DLB_PD@meta.data$celltype %>% 
+  unique %>% 
+  .[1:6]),
+    features = genes2plot,
+  size = 4
+  ) +
+    scale_fill_viridis_c() +
+  labs(
+    y = "Gene", 
+    x = "Cells"
+  ) +
+  theme(
+    panel.border = element_rect(colour = NA), 
+    plot.margin = margin(r = 1, unit = "cm"))
+  
+  f4c
+
+```
+
+
+## d - mouse celltype markers
+```{r}
+# SET THE IDEMTS TO CELLTYPE
+Idents(seurat_objects$mouse_Npc1) <- seurat_objects$mouse_Npc1@meta.data$celltype
+
+genes2plot.mm = c(
+  # exc neurons
+ "Gabra6", "Kcnd2",
+  # inhib neuron
+ "Gad1", "Gad2",
+ 
+ # astrocye
+ "Slc4a4","Aqp4",
+ 
+ # Mg and immune
+ "C1qa", "Ctss", 
+ 
+ # oligodend
+ "Mobp", "Mbp", 
+ 
+ # Endo-stalk
+ "Flt1", "Ly6c1",
+ 
+ # endothelial
+ "Rgs5", "Myl9", 
+ # ependymal cells
+ "Calml4", "Rbp1",
+ # fibroblast
+ "Dcn", "Pdgfra"
+ )
+ 
+cells2plot = c("NeuronEx", "Astrocyte", "Endothelial", "MicrogliaImmune", "EndothelialStalk", "Ependymal", "Oligodendrocyte", "Fibroblast", "NeuronIn")
+
+f4d <- Seurat::DoHeatmap(
+  seurat_objects$mouse_Npc1 %>% 
+    subset(subset = celltype %in% cells2plot),
+  features = genes2plot.mm,
+  size = 4
+) +
+  scale_fill_viridis_c() +
+  theme(
+    panel.border = element_rect(colour = NA), # turn off annoying box
+    plot.margin = margin(r = 1, unit = "cm")
+  ) +
+  labs(
+    y = "Gene", 
+    x = "Cells"
+  )  
+f4d
+```
+
+### final fig.
+```{r}
+f4.AB /
+ f4c / 
+  f4d +
+  plot_layout(
+    guides = "collect"
+    ) +
+  ggsave(
+    "output/figs/paper/fig4.png", 
+    width = 24, 
+    height = 24,
+    units = "cm",
+    scale = 1.8
+  )
+    
+```
+
+
+
+# Fig.5 - DLB & LSDs
+```{r}
+fry = list(
+  
+  npc1_lysoDLB = qread("data/public data/PRJNA606815_NPC_mousebrain/R_objects/fry_results.qs"),
+  DLB = qread("data/public data/GSE178146_RAW/R_objects/fry_results.qs"), 
+  npc1_lysoPD= qread("data/public data/PRJNA606815_NPC_mousebrain/R_objects/fry_results_PD.qs")
+) 
+
+# read in clusters which are converyed to mice
+network.genes.cluster <- qread("data/public data/PRJNA606815_NPC_mousebrain/R_objects/network.genes.cluster.mouseSymbol.qs")
+
+# for 5cd,
+toptables4plot = list(
+  DLB = qread("data/public data/GSE178146_RAW/R_objects/toptables.qs"), 
+  npc1 = qread("data/public data/PRJNA606815_NPC_mousebrain/R_objects/toptables.qs")
+  )
+```
+
+## A - pvals hm
+```{r}
+fry.plot.input = fry$DLB$DLB %>% 
+  bind_rows() %>% 
+  dplyr::select(pathway, PValue.Mixed, FDR.Mixed,  coef) %>% 
+  bind_rows(
+    fry$npc1 %>% 
+      bind_rows() %>% 
+      dplyr::select(pathway, PValue.Mixed, FDR.Mixed, coef)
+  ) 
+
+sig.clusters <- fry.plot.input %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>%
+  .$pathway %>% 
+  unique
+
+fig.5a <- fry.plot.input %>% 
+  dplyr::filter(pathway %in% sig.clusters) %>% 
+  arrange(FDR.Mixed) %>% 
+  mutate(
+    coef = str_remove(coef, pattern = " - Contr.+$"), 
+    species = case_when(
+      grepl(coef, pattern = "^DLB") ~ "Human DLB", 
+      grepl(coef, pattern = "7week") ~ "Mouse Npc1\n(symptomatic)", 
+      grepl(coef, pattern = "3week") ~ "Mouse Npc1\n(pre-symptomatic)", 
+    ), 
+    celltype = str_remove(coef, pattern = "DLB_"), 
+    celltype = str_remove(celltype, pattern = "_.week"), 
+    pathway = fct_inorder(pathway) %>% forcats::fct_rev()
+  ) %>% 
+  ggplot(
+    aes(
+      x = celltype, y = pathway
+    )
+  ) +
+  geom_tile(
+    aes(fill = -log10(PValue.Mixed))
+  ) +
+  geom_label(
+    aes(label = signif(FDR.Mixed, 2)), 
+    data = . %>% 
+      dplyr::filter(FDR.Mixed < 0.05)
+  ) +
+  facet_wrap(~species, 
+             scales = "free_x", space = "free_x") +
+  scale_fill_viridis_c(
+    option = "magma"
+  ) +
+  labs(
+    x = "Cell type", 
+    y = "Netcoloc community", 
+    fill = "-log10(PValue)"
+  ) +
+  theme(
+    axis.text = element_text(size = 12), 
+    axis.title = element_text(size = 15, face = "bold"), 
+    strip.text = element_text(size = 12)
+  )
+fig.5a
+```
+
+## B heatmap of C436 in DLB
+```{r}
+genes2keep.f5a <- toptables$DLB[names(toptables$DLB) %>%
+                  grep(
+                    pattern = "DLB", 
+                    value = T
+                  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  (cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+                  dplyr::select(Cluster, genes) %>% 
+                  mutate(genes = str_split(genes, " ")) %>% 
+                  deframe() %>% 
+                  .$C436)
+  ) %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    # select genes which have greater than 1 logFC
+    FDR < 0.1
+  ) %>% 
+  .$gene %>% 
+  unique
+
+  
+
+FDR_mat.dlb <- 
+ toptables$DLB[names(toptables$DLB) %>%
+  grep(
+    pattern = "DLB", 
+    value = T
+  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% genes2keep.f5a
+  ) %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  mutate(
+    coef = str_remove(coef, pattern = "DLB_")
+  ) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = FDR
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t 
+
+
+f.5b <- 
+  toptables$DLB[names(toptables$DLB) %>%
+                  grep(
+                    pattern = "DLB", 
+                    value = T
+                  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  genes2keep.f5a
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  t %>% 
+  as.matrix() %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-10, 0, 3), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_row_names = T,
+    cluster_rows = TRUE,
+    height = unit(4, "cm"), 
+    border_gp = gpar("black"),
+    
+    ## legend
+    heatmap_legend_param = list(
+      direction = "horizontal", 
+      legend_width = unit(5, "cm")
+    ),
+  
+    
+    ##  ~~ COLUMNS ~~ ##
+    cluster_columns = TRUE, 
+    show_column_names = T,
+    show_column_dend =  F, 
+    column_names_gp = gpar(fontsize = 10, fontface = "bold"),
+    
+    ## ~~ DE genes asterix ~~ ## 
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+      
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat.dlb[i, j]) && FDR_mat.dlb[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    }
+  ) 
+f.5b
+```
+
+## C: hm of logFC in NPC1 at 3wk. 
+
+```{r}
+f5c.input.df <- toptables$npc1 %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% network.genes.cluster$DLB$C436
+  ) %>% 
+  dplyr::select(gene, logFC, FDR, coef)
+
+genes2keep.f5c <- 
+  f5c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "3week")
+  ) %>% 
+  dplyr::filter(
+    # select genes which have greater than 1 logFC
+    FDR < 0.1
+  ) %>% 
+  .$gene %>% 
+  unique
+
+
+
+FDR_mat.3wk <- 
+  f5c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "3week"), 
+    gene %in% genes2keep.f5c
+  ) %>% 
+  mutate(coef = str_remove(coef, "_3week_Npc1 - .+$")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = FDR
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t %>% 
+  as.data.frame() %>% 
+  # dplyr::select(where(~ max(abs(.x), na.rm = TRUE) >= 1)) %>% 
+  as.matrix()
+
+f5.c_3wk <- 
+f5c.input.df %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "3week"), 
+    gene %in% genes2keep.f5c
+  ) %>% 
+  mutate(coef = str_remove(coef, "_3week_Npc1 - .+$")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-10, 0, 10), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_row_names = T,
+    cluster_rows = TRUE,
+    show_heatmap_legend = F,
+    
+    ##  ~~ COLUMNS ~~ ##
+    cluster_columns = TRUE, 
+    show_column_names = T,
+    show_column_dend =  F, 
+    column_names_gp = gpar(fontsize = 12, fontface = "bold"),
+    
+    ## ~~ DE genes asterix. 
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+      
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat.3wk[i, j]) && FDR_mat.3wk[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    },
+    
+    height = unit(4, "cm"), 
+    border_gp = gpar("black")
+  )
+
+f5.c_3wk
+```
+
+## D: 7 week. 
+```{r}
+genes2keep.f5d <- 
+  f5c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "7week")
+  ) %>% 
+  dplyr::filter(
+    # select genes which have greater than 1 logFC
+    FDR < 0.1
+  ) %>% 
+  .$gene %>% 
+  unique
+
+# Build the FDR matrix (for asterisk overlay)
+FDR_mat.7wk <- 
+  f5c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "7week"), 
+    gene %in% genes2keep.f5d
+  ) %>% 
+  mutate(
+    coef = str_remove(coef, "_7week_Npc1 - .+$")
+  ) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = FDR
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  t %>% 
+  as.matrix()
+  
+  
+f5.c_7wk <- 
+  f5c.input.df %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+    dplyr::filter(
+      grepl(coef, pattern = "7week"), 
+      gene %in% genes2keep.f5d
+    ) %>% 
+  mutate(
+    coef = str_remove(coef, "_7week_Npc1 - .+$")
+    ) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+    t %>% 
+    as.matrix() %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-10, 0, 10), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_row_names = T,
+    cluster_rows = TRUE,
+    show_heatmap_legend = F,
+    
+    ##  ~~ COLUMNS ~~ ##
+    cluster_columns = TRUE, 
+    show_column_names = T,
+    show_column_dend =  F, 
+    column_names_gp = gpar(fontsize = 12, fontface = "bold"),
+    
+    ## ~~ DE genes asterix. 
+      cell_fun = function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat.7wk[i, j]) && FDR_mat.7wk[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    },
+    
+    height = unit(4, "cm"), 
+    border_gp = gpar("black")
+    
+  )
+f5.c_7wk
+```
+
+
+
+## Final fig
+```{r}
+pdf("output/figs/paper/fig5.pdf", width = 20, height = 16)
+fig.5a /
+  grid.grabExpr(draw(f.5b, column_title = "Lyso_DLB C436\nHuman DLB", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"), 
+       heatmap_legend_side = "top", 
+       )) / 
+  grid.grabExpr(draw(f5.c_3wk, column_title = "Mouse NPC1\npresymptomatic", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))) /
+  grid.grabExpr(draw(f5.c_7wk, column_title = "Mouse NPC1\nsymptomatic", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))) +
+  plot_layout(
+    design =  c(
+      "AAAAAA
+       BBBBBB
+       CCCCCC
+       DDDDDD"
+    )
+  ) +
+  plot_annotation(
+    tag_levels = 'A')
+dev.off()  
+```
+
+# Figure 6: PD & LSDs
+## A - pvals of hm
+```{r}
+fry.plot.input.6 = fry$npc1_lysoPD %>% 
+  bind_rows() %>% 
+  dplyr::select(pathway, PValue.Mixed, FDR.Mixed,  coef) %>% 
+  bind_rows(
+    fry$DLB$PD %>% 
+      bind_rows() %>% 
+      dplyr::select(pathway, PValue.Mixed, FDR.Mixed, coef)
+  ) 
+
+sig.clusters.6 <- fry.plot.input.6 %>% 
+  dplyr::filter(FDR.Mixed < 0.05) %>%
+  .$pathway %>% 
+  unique
+
+fig.6a <- 
+  fry.plot.input.6 %>% 
+  dplyr::filter(pathway %in% sig.clusters.6) %>% 
+  arrange(FDR.Mixed) %>% 
+  mutate(
+    coef = str_remove(coef, pattern = " - Contr.+$"), 
+    species = case_when(
+      grepl(coef, pattern = "^PD_") ~ "Human PD", 
+      grepl(coef, pattern = "^PDD_") ~ "Human PDD", 
+      grepl(coef, pattern = "7week") ~ "Mouse Npc1\n(symptomatic)", 
+      grepl(coef, pattern = "3week") ~ "Mouse Npc1\n(pre-symptomatic)", 
+    ), 
+    celltype = str_remove(coef, pattern = "PD_"), 
+    celltype = str_remove(coef, pattern = "PDD_"), 
+    celltype = str_remove(celltype, pattern = "_.week"), 
+    celltype = str_remove(celltype, pattern = "PD_"), 
+    pathway = fct_inorder(pathway) %>% forcats::fct_rev()
+  ) %>% 
+  ggplot(
+    aes(
+      x = celltype, y = pathway
+    )
+  ) +
+  geom_tile(
+    aes(fill = -log10(PValue.Mixed))
+  ) +
+  geom_label(
+    aes(label = signif(FDR.Mixed, 2)), 
+    data = . %>% 
+      dplyr::filter(FDR.Mixed < 0.05)
+  ) +
+  facet_wrap(~species, 
+             scales = "free_x", space = "free_x") +
+  scale_fill_viridis_c(
+    option = "magma"
+  ) +
+  labs(
+    x = "Cell type", 
+    y = "Netcoloc community", 
+    fill = "-log10(PValue)"
+  ) +
+  theme(
+    axis.text = element_text(size = 12), 
+    axis.title = element_text(size = 15, face = "bold"), 
+    strip.text = element_text(size = 12),
+    axis.text.x = element_text(angle = -15, hjust = 0, vjust = 1)
+  )
+fig.6a
+```
+
+
+## B heatmap of C251 in PD & PDD
+```{r}
+genes2keep.fig6a <- 
+  toptables4plot$DLB[names(toptables4plot$DLB) %>%
+                  grep(
+                    pattern = "PD", 
+                    value = T
+                  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  (cluster.gprofiler.results$CD_1A_lyso_PD %>% 
+                  dplyr::select(Cluster, genes) %>% 
+                  mutate(genes = str_split(genes, " ")) %>% 
+                  deframe() %>% 
+                  .$C251)
+  ) %>% 
+  dplyr::select(gene, coef, FDR, logFC) %>% 
+  dplyr::filter(
+    # select genes which have greater than 1 logFC
+    logFC > abs(2) | FDR < 0.1
+  ) %>% 
+  .$gene %>% 
+  unique
+
+  
+
+FDR_mat.PD <- 
+ toptables4plot$DLB[names(toptables4plot$DLB) %>%
+                  grep(
+                    pattern = "PD", 
+                    value = T
+                  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% genes2keep.fig6a
+  ) %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  # mutate(
+  #   coef = str_remove(coef, pattern = "PD_"),
+  #   coef = str_remove(coef, pattern = "PDD_")
+  # ) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = FDR
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t 
+
+
+f.6b <- 
+ toptables4plot$DLB[names(toptables4plot$DLB) %>%
+                  grep(
+                    pattern = "PD", 
+                    value = T
+                  )] %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in%  genes2keep.fig6a
+  ) %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  #mutate(coef = str_remove(coef, "DLB_")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  t %>% 
+  as.matrix() %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-2, 0, 2), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_row_names = T,
+    cluster_rows = TRUE,
+    height = unit(4, "cm"), 
+    border_gp = gpar("black"),
+    
+    ## legend
+    heatmap_legend_param = list(
+      direction = "horizontal", 
+      legend_width = unit(5, "cm")
+    ),
+  
+    
+    ##  ~~ COLUMNS ~~ ##
+    cluster_columns = TRUE, 
+    show_column_names = T,
+    show_column_dend =  F, 
+    column_names_gp = gpar(fontsize = 10, fontface = "bold"),
+    
+    ## ~~ DE genes asterix ~~ ## 
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+      
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat.PD[i, j]) && FDR_mat.PD[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    }
+  ) 
+f.6b
+```
+
+## C: hm of logFC in NPC1 at 3wk. 
+
+```{r}
+f6c.input.df <- toptables4plot$npc1 %>% 
+  bind_rows() %>% 
+  dplyr::filter(
+    gene %in% network.genes.cluster$PD$C251
+  ) %>% 
+  dplyr::select(gene, logFC, FDR, coef)
+
+genes2keep.f6c <- 
+  f6c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "3week")
+  ) %>% 
+  dplyr::filter(
+    # select genes which have greater than 1 logFC
+    logFC > abs(2) | FDR < 0.1
+  ) %>% 
+  .$gene %>% 
+  unique
+
+
+
+FDR_mat.3wk <- 
+  f6c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "3week"), 
+    gene %in% genes2keep.f6c
+  ) %>% 
+  mutate(coef = str_remove(coef, "_3week_Npc1 - .+$")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = FDR
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t %>% 
+  as.data.frame() %>% 
+  # dplyr::select(where(~ max(abs(.x), na.rm = TRUE) >= 1)) %>% 
+  as.matrix()
+
+# f6.c_3wk <- 
+f6c.input.df %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "3week"), 
+    gene %in% genes2keep.f5c
+  ) %>% 
+  mutate(coef = str_remove(coef, "_3week_Npc1 - .+$")) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  as.matrix() %>% 
+  t %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-2, 0, 2), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_row_names = T,
+    cluster_rows = TRUE,
+    show_heatmap_legend = T,
+    
+    ##  ~~ COLUMNS ~~ ##
+    cluster_columns = TRUE, 
+    show_column_names = T,
+    show_column_dend =  F, 
+    column_names_gp = gpar(fontsize = 12, fontface = "bold"),
+    
+    ## ~~ DE genes asterix. 
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+      
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat.3wk[i, j]) && FDR_mat.3wk[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    },
+    
+    height = unit(4, "cm"), 
+    border_gp = gpar("black")
+  )
+
+f6.c_3wk
+```
+
+## D: 7 week. 
+```{r}
+genes2keep.f6d <- 
+  f6c.input.df %>% 
+  dplyr::select(gene, coef,logFC, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "7week")
+  ) %>% 
+  dplyr::filter(
+    # select genes which have greater than 1 logFC
+      logFC > abs(2) | FDR < 0.1
+  ) %>% 
+  .$gene %>% 
+  unique
+
+# Build the FDR matrix (for asterisk overlay)
+FDR_mat.7wk <- 
+  f6c.input.df %>% 
+  dplyr::select(gene, coef, FDR) %>% 
+  dplyr::filter(
+    grepl(coef, pattern = "7week"), 
+    gene %in% genes2keep.f6d
+  ) %>% 
+  mutate(
+    coef = str_remove(coef, "_7week_Npc1 - .+$")
+  ) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = FDR
+  ) %>% 
+  column_to_rownames("gene") %>% 
+  t %>% 
+  as.matrix()
+  
+  
+f6.c_7wk <- 
+  f6c.input.df %>% 
+  dplyr::select(gene, coef, logFC) %>% 
+    dplyr::filter(
+      grepl(coef, pattern = "7week"), 
+      gene %in% genes2keep.f6d
+    ) %>% 
+  mutate(
+    coef = str_remove(coef, "_7week_Npc1 - .+$")
+    ) %>% 
+  pivot_wider(
+    names_from = coef,
+    values_from = logFC
+  ) %>% 
+  column_to_rownames("gene") %>% 
+    t %>% 
+    as.matrix() %>% 
+  Heatmap(
+    name = "logFC",
+    col = colorRamp2(c(-10, 0, 10), c("blue4", "white", "red3")),
+    show_row_dend = F, 
+    show_row_names = T,
+    cluster_rows = TRUE,
+    show_heatmap_legend = F,
+    
+    ##  ~~ COLUMNS ~~ ##
+    cluster_columns = TRUE, 
+    show_column_names = T,
+    show_column_dend =  F, 
+    column_names_gp = gpar(fontsize = 12, fontface = "bold"),
+    
+    ## ~~ DE genes asterix. 
+      cell_fun = function(j, i, x, y, width, height, fill) {
+      # j = column index, i = row index
+      # x, y = coordinates of the center of the cell
+      # width, height = size of the cell
+      # fill = background color (not used here)
+
+      # Check if the FDR value for this cell exists and is below 0.05
+      if (!is.na(FDR_mat.7wk[i, j]) && FDR_mat.7wk[i, j] < 0.05) {
+        # If yes, overlay a text label "*" on that cell
+        grid.text("*", x, y, gp = gpar(fontsize = 15))
+      }
+    },
+    
+    height = unit(4, "cm"), 
+    border_gp = gpar("black")
+    
+  )
+f5.c_7wk
+```
+
+
+
+## Final fig
+```{r}
+pdf("output/figs/paper/fig6.pdf", width = 20, height = 14)
+fig.6a /
+  grid.grabExpr(draw(f.6b, column_title = "Lyso-PD C251\nHuman PD & PDD", 
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"), 
+       heatmap_legend_side = "top", 
+        )) +
+     grid.grabExpr(draw(f6.c_3wk, column_title = "Mouse NPC1\npresymptomatic",
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))) +
+  grid.grabExpr(draw(f6.c_7wk, column_title = "Mouse NPC1\nsymptomatic",
+       column_title_gp = gpar(fontsize = 18, fontface = "bold"))) +
+  plot_layout(
+    design =  c(
+      "AAAAAA
+       #BBCC#
+       #BBCC#
+       DDDDDD"
+    )
+  ) +
+  plot_annotation(
+    tag_levels = 'A')
+dev.off()  
+```
+
+
+# Supp figures
+## Supp figure toptables
+
+```{r}
+volcano_data <- 
+  toptables4plot$DLB %>%
+  bind_rows() %>% 
+  mutate(
+  coef = str_remove(coef, pattern = "_Npc1.+_WT$"),
+    DE = FDR < 0.05
+  ) 
+
+# Count number of DE up/down per celltype (coef)
+volcano_labels <- volcano_data %>%
+  dplyr::filter(DE) %>%
+  mutate(direction = ifelse(logFC > 0, "Up", "Down")) %>%
+  group_by(coef, direction) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(
+    x = ifelse(direction == "Up", 3, -3),  # approximate x positions
+    y = max(-log10(volcano_data$PValue), na.rm = TRUE) * 0.9,  # high y
+    label = paste0(direction, ": ", n)
+  )
+
+# Plot
+ggplot(volcano_data, aes(x = logFC, y = -log10(PValue))) +
+  geom_point(aes(colour = DE)) +
+  scale_color_manual(values = c("grey50", "red")) +
+  facet_wrap(~coef) +
+  geom_text(
+    data = volcano_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4,
+    hjust = 0.5
+  ) +
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(P value)"
+  ) 
+```
+
+
+
+## CNET plots
+```{r}
+ORA.C251 <- enrichKEGG(
+  
+  gene = bitr(fromType = "SYMBOL", toType = "ENTREZID", 
+     cluster.gprofiler.results$CD_1A_lyso_PD %>% 
+       dplyr::select(Cluster, genes) %>% 
+       dplyr::filter(Cluster == "C251") %>% 
+       .$genes %>% 
+       str_split(pattern = " ") %>% 
+       unlist, 
+     OrgDb = org.Hs.eg.db
+     ) %>% 
+  .$ENTREZID
+) %>% 
+  setReadable(OrgDb = org.Hs.eg.db, 
+              keyType = "ENTREZID") 
+
+ORA.C436 <- enrichKEGG(
+  
+  gene = bitr(fromType = "SYMBOL", toType = "ENTREZID", 
+     cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+       dplyr::select(Cluster, genes) %>% 
+       dplyr::filter(Cluster == "C436") %>% 
+       .$genes %>% 
+       str_split(pattern = " ") %>% 
+       unlist, 
+     OrgDb = org.Hs.eg.db
+     ) %>% 
+  .$ENTREZID
+) %>% 
+  setReadable(OrgDb = org.Hs.eg.db, 
+              keyType = "ENTREZID")
+```
+
+```{r}
+pdf("output/figs/paper/suppfig_cnet.pdf", width = 20, height = 14)
+dotplot(ORA.C436, showCategory = 14) +
+   ggtitle( "LysoDLB: C436") +
+  cnetplot(ORA.C436, showCategory = 14, layout = "kk") +
+ 
+  
+dotplot(ORA.C251, showCategory = 14) + 
+  ggtitle( "LysoPD: C251") +
+  cnetplot(ORA.C251, showCategory = 14, layout = "nicely") +
+  
+  
+  plot_annotation(tag_levels = 'A') +
+  plot_layout(
+    design = "
+    AABBBBB
+    AABBBBB
+    CCDDDDD
+    CCDDDDD"
+  )
+dev.off()
+```
+

@@ -115,7 +115,7 @@ toptables %<>%
   }) 
 ```
 
-## assess expression of network genes
+## assess differential expression of network genes
 I now will assess the expression of the network genes in ALS nad FTLD, (both familial and sporadic forms)
 
 ```{r}
@@ -124,7 +124,8 @@ toptables %>%
   list_rbind() %>% 
   dplyr::filter(
     Gene %in% node_metadata$CD_1A_lyso_ALS$X,
-    padj < 0.05
+    padj < 0.05,
+    grepl(disease_group, pattern = "ALS")
     ) %>% 
   group_by(disease_group, celltype) %>% 
   summarise(n = n()) %>% 
@@ -135,8 +136,36 @@ toptables %>%
     .value = n, 
    
     cluster_columns = FALSE
-  )
+  ) 
 ```
+
+```{r}
+toptables %>% 
+  list_c() %>% 
+  list_rbind() %>% 
+  dplyr::filter(
+    Gene %in% node_metadata$CD_1A_lyso_FTLD$X,
+    padj < 0.05,
+    grepl(disease_group, pattern = "FTLD")
+    ) %>% 
+  group_by(disease_group, celltype) %>% 
+  summarise(n = n()) %>% 
+  ungroup %>% 
+  tidyHeatmap::heatmap(
+    .row = celltype, 
+    .column = disease_group,
+    .value = n, 
+   
+    cluster_columns = FALSE, 
+    cluster_rows = F
+  ) 
+```
+
+```{r}
+
+```
+
+
 
 
 

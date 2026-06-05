@@ -34,6 +34,8 @@ library(gridExtra)
 library(gridGraphics)
 library(viridis)
 library(tidytext)
+library(pheatmap)
+library(patchwork)
 
 # annotations
 library(org.Hs.eg.db)
@@ -84,7 +86,7 @@ node_metadata <-
 
 ```{r}
 genesets <- list.files(
-  path = "data/genesets/adultchildsubtypes",
+  path = "data/genesets/v2/adultchildsubtypes",
   pattern = ".csv",
   full.names = TRUE
 ) %>% 
@@ -280,10 +282,10 @@ Netcoloc was performed and below shows the expected vs observed ratio of the gen
 
 ```{r}
 # Define path
-base_path <- "data/results/adultchildsubtypes/"
+base_path <- "data/results/adultchildsubtypes v2/"
 
 # Read enrichment files
-enrichment_dfs <- 
+enrichment_dfs2 <- 
   list.files(base_path, recursive = TRUE, full.names = TRUE) %>%
   grep(pattern = "network_colocalization_enrichment", 
        value = TRUE) %>% 
@@ -788,6 +790,9 @@ cluster.gprofiler.results %>%
       )
   }) %>% 
   bind_rows() %>% 
+  dplyr::filter(
+    comparison %in% c("CD_1A_lyso_PD", "CD_1A_lyso_DLB")
+  ) %>% 
   ggplot(
     aes(
       x = -log10(FDR),
@@ -1632,4 +1637,138 @@ enrichment_dfs %>%
   )
 ```
 
-##
+### mouse variants
+```{r}
+mouse.variant.wholesubnetworks %>%
+  dplyr::filter(
+    CD == "CD_1A_lyso",
+    adult %in% c("DLB", "PD")
+  ) %>% 
+  group_by(comparison, MPO_term_type) %>%
+  slice_min(order_by = OR_p, n = 10) %>%
+  ungroup() %>% 
+  mutate(
+    MP_description = reorder_within(
+      MP_description, log_OR, comparison), 
+    comparison = case_when(
+      grepl(comparison, pattern = "DLB") ~ "Lysosomal disorders\n&\ndementia with Lewy bodies", 
+      grepl(comparison, pattern = "PD") ~ "Lysosomal disorders\n&\nParkinson's disease", 
+    )
+    
+  ) %>%
+  ggplot(
+    aes(x = log_OR, y = MP_description)
+  ) +
+  geom_errorbarh(
+    aes(xmin = log_OR_CI_lower, xmax = log_OR_CI_upper),
+    height = 0.2, color = "black"
+  ) +
+  geom_point(
+    aes(size = num_genes_in_term, color = MPO_term_type),
+    alpha = 0.6
+  ) +
+  geom_vline(xintercept = 0, lty = 2, color = "grey50") +
+  geom_label(
+    aes(label = signif(OR_p, 2)),
+    nudge_y = 0.4
+  ) +
+  scale_y_reordered() +  # This removes the `___comparison` suffix added by reorder_within()
+  labs(
+    x = "log(OR) ± 95% CI",
+    y = NULL,
+    size = "# Genes in MPO term",
+    color = "Term Type"
+  ) +
+  facet_wrap(~comparison, nrow = 1,
+             scales = "free"
+  ) +
+  theme(
+    text = element_text(size = 18)
+  ) +
+  ggsave(
+    "output/figs/paper/mouse_variant_enrichment_lyso_DLB_PD.svg", 
+    width = 20, height = 7, scale = 1
+  )
+```
+
+### simialrity of DLB and PD clusters
+```{r}
+# Define a helper to calculate Jaccard Similarity
+calc_jaccard <- function(list_a, list_b) {
+  intersection <- length(intersect(list_a, list_b))
+  
+  union <- length(list_a) + length(list_b) - intersection
+  
+  if (union == 0) return(0)
+  return(intersection / union)
+}
+
+# extract DLB and PD clusters
+dlb_clusters <- 
+  cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  split(f = .$Cluster) %>% 
+  lapply(function(x) {
+     x$genes %>% 
+      str_split(" ") %>% 
+      unlist()
+  })
+
+pd_clusters <- cluster.gprofiler.results$CD_1A_lyso_PD %>% 
+  dplyr::select(Cluster, genes) %>% 
+  split(f = .$Cluster) %>% 
+  lapply(function(x) {
+     x$genes %>% 
+      str_split(" ") %>% 
+      unlist
+  })
+
+# Create an empty matrix
+sim_matrix <- matrix(NA, 
+                     nrow = length(dlb_clusters), 
+                     ncol = length(pd_clusters),
+                     dimnames = list(names(dlb_clusters), names(pd_clusters)))
+
+# Fill the matrix
+for (d_name in names(dlb_clusters)) {
+  for (p_name in names(pd_clusters)) {
+    sim_matrix[d_name, p_name] <- 
+      calc_jaccard(dlb_clusters[[d_name]], pd_clusters[[p_name]])
+  }
+}
+
+
+# 1. Create heatmap (DO NOT print)
+ph <- pheatmap(
+  sim_matrix,
+  display_numbers = TRUE,
+  main = "Jaccard index of LysoPD and LysoDLB network communities",
+  color = colorRampPalette(c("white", "red"))(100),
+  silent = TRUE
+)
+
+# Convert pheatmap gtable to a patchwork-compatible object
+heatmap_plot <- wrap_elements(full = ph$gtable)
+
+# 2. Create Venn diagram
+venn_plot <- ggVennDiagram::ggVennDiagram(
+  list(
+    lysoPD  = node_metadata$CD_1A_lyso_PD$X,
+    lysoDLB = node_metadata$CD_1A_lyso_DLB$X
+  ),
+  label = "count",
+  label_color = "white",
+  label_size = 6, 
+) +
+  scale_fill_viridis_c(begin = 0.2) +
+  theme_void()
+
+# 3. Combine into a single image
+venn_plot + heatmap_plot +
+  plot_layout(widths = c(1, 2), ) +
+  ggsave("output/figs/venndiagramandjaccard.svg")
+
+```
+
+
+

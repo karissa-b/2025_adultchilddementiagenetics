@@ -69,6 +69,10 @@ genesets <- list.files(
              str_remove(pattern = "data/genesets/adultchild/") %>% 
              str_remove(pattern = ".csv"))
 
+genesets$adult_all <- 
+  read_csv("data/genesets/Alternate_gene_lists_for_NetColoc_senstivity_analyses/adult_all.csv")$GENE
+
+
 genesets.bystype <- list.files(
   path = "data/genesets/adultchildsubtypes",
   pattern = ".csv",
@@ -82,6 +86,8 @@ genesets.bystype <- list.files(
   setNames(names(.) %>% 
              str_remove(pattern = "data/genesets/adultchildsubtypes/") %>% 
              str_remove(pattern = ".csv"))
+
+
 
 # get these for help later
 adult = c("AD", "PD", "ALS", "FTLD", "DLB")
@@ -110,7 +116,7 @@ genesets %>%
   ) 
 ```
 
-Only 10 genes are shared between adult- and childhood-onset dementia
+Only 13 genes are shared between adult- and childhood-onset dementia
 ```{r}
 genesets %>%
   .[
@@ -314,7 +320,8 @@ As a positive control, we also ran AD vs PD, where known changes in the endolyso
 # Read enrichment files
 enrichment_dfs <- 
   list.files(
-    "data/results/adultchild", recursive = TRUE, full.names = TRUE) %>% 
+    "data/results/adultchild/CD_all_adult_allv2", 
+    recursive = TRUE, full.names = TRUE) %>% 
   grep(pattern = "network_colocalization_enrichment", 
        value = TRUE) %>%
   set_names(
@@ -835,7 +842,7 @@ p2 <- kegg %>%
   plot_annotation(
     title = "Overlap of KEGG pathways")
 
-ggarrange(p1, p2, labels = "AUTO") +
+ggarrange(p1, p2, labels = "AUTO")
 
   ggsave(
     "output/figs/paper/overlap-plots.svg", 
