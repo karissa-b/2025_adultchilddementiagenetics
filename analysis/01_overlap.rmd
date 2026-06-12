@@ -1,0 +1,275 @@
+---
+title: "01_overlap"
+author: "Karissa Barthelson"
+date: "2026-06-11"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+
+library(patchwork)
+
+# annotations
+library(org.Hs.eg.db)
+
+# enrichemnt
+library(clusterProfiler)
+library(gprofiler2)
+library(ReactomePA)
+library(DOSE)
+
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold", colour = "white"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+# import
+```{r}
+# All nodes in PCnet
+nodes <- readRDS("data/R_objects/network/nodes.rds")
+
+# input gene sets
+genesets <- list.files(
+  path = "data/genesets/v2/adultchildsubtypes",
+  # pattern = ".csv",
+  full.names = TRUE
+) %>% 
+  sapply(function(x) {
+    x %>% 
+      read_csv() %>% 
+      pull(1)
+  }, simplify = F) %>% 
+  setNames(names(.) %>% 
+             str_remove(pattern = "data/genesets/v2/adultchildsubtypes/") %>% 
+             str_remove(pattern = ".csv") %>% 
+             str_remove(pattern = "_v2_list.txt") 
+           )
+
+# genesets %>% 
+#   lapply(length) %>% 
+#   stack
+```
+
+# helper functions
+```{r}
+# run KEGG ORA
+runKEGG = function(geneset) {
+
+  uv =   bitr(nodes, 
+                fromType = "SYMBOL", toType = "ENTREZID", 
+                OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID
+  
+  bitr(geneset, 
+       fromType = "SYMBOL", toType = "ENTREZID", 
+     OrgDb ="org.Hs.eg.db") %>% 
+  .$ENTREZID %>%
+  enrichKEGG(
+    organism = 'hsa',
+    universe = uv,
+    pvalueCutoff = 0.05)
+}
+
+
+runEnrichWP = function(geneset) {
+  
+  uv =   bitr(nodes, 
+              fromType = "SYMBOL", toType = "ENTREZID", 
+              OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID
+  
+  bitr(geneset, 
+       fromType = "SYMBOL", toType = "ENTREZID", 
+       OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID %>%
+    enrichWP(
+      organism =   "Homo sapiens",
+      universe = uv,
+      pvalueCutoff = 0.05)
+}
+
+runEnrichReactome = function(geneset) {
+  
+  uv =   bitr(nodes, 
+              fromType = "SYMBOL", toType = "ENTREZID", 
+              OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID
+  
+  bitr(geneset, 
+       fromType = "SYMBOL", toType = "ENTREZID", 
+       OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID %>%
+    enrichPathway(
+      organism="human",
+      universe = uv,
+      pvalueCutoff = 0.05)
+}
+```
+
+# Overlap between CD.all and adult.all
+## genes
+```{r}
+CD.all = genesets[genesets %>% names %>% grep(pattern = "^CD", value = T)] %>% stack
+adult.all = genesets[genesets %>% names %>% grep(pattern = "AD|PD|ALS|FTLD|DLB", value = T)] %>% stack 
+
+# number of shared genes
+shared.genes = intersect(CD.all$values, adult.all$values) 
+length(shared.genes)
+
+# number of adult onset genes
+length(adult.all $values %>% unique)
+
+# number of CD genes
+length(CD.all $values %>% unique)
+
+CD.all %>% 
+  bind_rows(adult.all) %>% 
+  dplyr::filter(values %in% shared.genes) %>%
+  arrange(values) %>% 
+  set_colnames(c("gene", "disease")) %>% 
+  mutate(
+    type = case_when(
+      grepl(disease, pattern = "CD") ~ "Childhood dementia", 
+      TRUE ~ "Adult-onset NDD"), 
+    disease = case_when(
+      grepl(disease, pattern = "1A") ~ "Lysosomal disorders", 
+      grepl(disease, pattern = "1B") ~ "Other disorders of lipid metabolism & transport", 
+      grepl(disease, pattern = "1C") ~ "Disorders of amino acid & other organic acid metabolism", 
+      grepl(disease, pattern = "1D") ~ "Vitamin-responsive inborn errors of metabolism", 
+      grepl(disease, pattern = "1E") ~ "Disorders of mineral absorption & transport", 
+      grepl(disease, pattern = "1F") ~ "Peroxisomal diseases", 
+      grepl(disease, pattern = "1G") ~ "Mitochondrial disorders", 
+      grepl(disease, pattern = "1H") ~ "Other inborn errors of metabolism", 
+      grepl(disease, pattern = "2_") ~ "Leukodystrophies not notherwise categorised", 
+      grepl(disease, pattern = "3_") ~ "Neurodegeneration with brain iron accumulation", 
+      grepl(disease, pattern = "4_") ~ "Diseases not otherwise categorised",
+      TRUE ~ disease) %>% str_wrap(width = 30), 
+    ) %>% 
+  arrange(type) %>% 
+  mutate(
+    disease = fct_inorder(disease)
+  ) %>% 
+  ggplot(
+    aes(reorder(disease, type), gene, fill = type)
+    ) +
+  geom_tile(colour = "black") +
+  scale_fill_manual(
+    values = c("#449DD1", "#F2D543")
+    ) +
+  labs(x = NULL, y = NULL, fill = NULL) +
+  theme_classic(base_size = 11) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "top") 
+  # ggsave("output/plots4publication/overlap_genes_CD_adult.png", width = 6, height = 4)
+```
+
+## KEGG pathways
+```{r}
+ORA.genesets.adultchildall.KEGG.results = list(
+  adult.all = adult.all$values %>% unique, 
+  CD.all = CD.all$values %>% unique
+) %>% 
+  lapply(runKEGG)
+
+ORA.genesets.adultchildall.KEGG.results %>% 
+  lapply(function(x) {
+    x %>% 
+      as_tibble %>% 
+      .$Description
+  })
+
+kegg.tibbles = ORA.genesets.adultchildall.KEGG.results %>% 
+  lapply(function(x) {
+    x %>% 
+      as_tibble %>% 
+      .$Description
+  })
+kegg.tibbles
+
+intersect(kegg.tibbles$adult.all, kegg.tibbles$CD.all)
+```
+
+<!-- ## GO terms -->
+<!-- ```{r} -->
+<!-- # GO terms -->
+<!-- ORA.genesets.adultchildall.GO.results = list( -->
+<!--   adult.all = adult.all$values %>% unique, -->
+<!--   CD.all = CD.all$values %>% unique -->
+<!-- ) %>% -->
+<!--   lapply(function(x) -->
+<!--     {enrichGO( -->
+<!--   gene =  x, -->
+<!--   universe = nodes, -->
+<!--   keyType = "SYMBOL", -->
+<!--   pAdjustMethod = "fdr", -->
+<!--   minGSSize = 3, -->
+<!--   pool = F, -->
+<!--   ont = "ALL", -->
+<!--   OrgDb = org.Hs.eg.db) -->
+<!--   }) -->
+
+<!-- temp = ORA.genesets.adultchildall.GO.results %>% -->
+<!--   lapply(function(x) { -->
+<!--     x %>% -->
+<!--       as_tibble %>% -->
+<!--       .$Description -->
+<!--   }) -->
+
+<!-- intersect(temp$adult.all, temp$CD.all) -->
+<!-- ``` -->
+
+## wikipathways
+```{r}
+ORA.genesets.adultchildall.wikipa.results = list(
+  adult.all = adult.all$values %>% unique, 
+  CD.all = CD.all$values %>% unique
+) %>% 
+  lapply(function(x) 
+    {runEnrichWP(x)
+  })
+
+
+wikipath.genesets = ORA.genesets.adultchildall.wikipa.results %>% 
+  lapply(function(x) {
+    x %>% 
+      as_tibble %>% 
+      .$Description
+  })
+
+intersect(wikipath.genesets$adult.all, wikipath.genesets$CD.all)
+```
+
+## Reactome
+```{r}
+ORA.genesets.adultchildall.reactome.results = list(
+  adult.all = adult.all$values %>% unique, 
+  CD.all = CD.all$values %>% unique
+) %>% 
+  lapply(function(x) 
+    {runEnrichReactome(x)
+  })
+
+react.genesets = ORA.genesets.adultchildall.reactome.results %>% 
+  lapply(function(x) {
+    x %>% 
+      as_tibble %>% 
+      .$Description
+  })
+
+react.genesets
+
+intersect(react.genesets$adult.all, react.genesets$CD.all)
+```

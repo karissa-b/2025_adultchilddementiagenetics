@@ -1,0 +1,318 @@
+---
+title: "03 pan-neurodegen"
+author: "Karissa Barthelson"
+date: "2026-06-11"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(ggpubr)
+library(tidytext) # for reorderwithin
+
+library(clusterProfiler)
+library(MPO.db)
+library(homologene)
+
+library(org.Hs.eg.db)
+library(org.Mm.eg.db)
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold", colour = "white"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+
+# CD all and adult all
+
+Now I want to do a pan-neurodegenerative analssis - all the CD and adult genes combined. I looked at whether the adult and childhood-onset dementia genetics sig coloc in the network space. yes they do. 
+
+## import data & helper functions
+```{r}
+# All nodes in PCnet
+nodes <- readRDS("data/R_objects/network/nodes.rds")
+
+# run KEGG ORA
+runKEGG = function(geneset) {
+
+  uv =   bitr(nodes, 
+                fromType = "SYMBOL", toType = "ENTREZID", 
+                OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID
+  
+  bitr(geneset, 
+       fromType = "SYMBOL", toType = "ENTREZID", 
+     OrgDb ="org.Hs.eg.db") %>% 
+  .$ENTREZID %>%
+  enrichKEGG(
+    organism = 'hsa',
+    universe = uv,
+    pvalueCutoff = 0.05)
+}
+```
+
+```{r}
+input.f2a = read_csv("data/results/pan neurodegen analysis - adult v2/CD_all_adult_allv2/network_enrichment.csv") %>% 
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>%
+  pivot_longer(
+    cols = c(observed_overlap, expected_overlap_mean),
+    names_to = "type",
+    values_to = "value"
+  ) %>%
+  mutate(
+    type = recode(
+      type,
+      "observed_overlap" = "observed",
+      "expected_overlap_mean" = "expected"), 
+    comparison = "Childhood dementia\n&\nadult-onset\nneurodegen",
+    FDR = case_when(
+      empirical_p < 0.0001 ~ "p.FDR < 0.0001"
+    )
+  ) 
+  
+input.f2a %>% 
+ggplot(
+    aes(x = type, y = value, fill = type)
+    ) +
+  geom_bar(
+    stat = "identity", position = "dodge", width = 0.8
+  ) +
+  geom_errorbar(
+    data = . %>% 
+      dplyr::filter(type == "expected"),
+    aes(
+      ymin = value - 2 * expected_overlap_std,
+      ymax = value + 2 * expected_overlap_std),
+    width = 0.25
+  ) + 
+  geom_label(
+    data =  . %>%
+      dplyr::filter(type == "expected"),
+    aes(
+      x = 1.5, y =800,
+      label = FDR),
+    inherit.aes = FALSE,
+    fill = NA,
+    border.colour = NA,
+    colour = "grey20",
+    size = 5,
+    vjust = 0,
+    fontface = "bold",
+    show.legend = FALSE
+  )  +
+  labs(
+    y = "Number of genes", 
+    x = ""
+  ) +
+  facet_wrap(~comparison, nrow = 1, scales = "free") +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("grey50", "skyblue"))+
+   theme(
+    strip.text = element_text(size = 12),
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+   ) 
+  
+  
+```
+
+### ORA KEGG of pan-neurodegen
+```{r}
+# extract the genes in the pan-neurodegen subnetwork
+network.genes.pan.neurodegen <-  "data/results/pan neurodegen analysis - adult v2/CD_all_adult_allv2/overlapping_nodes_metadata.csv" %>% 
+  read.csv %>%
+  mutate(
+     comparison = "Childhood dementia\n&\nadult-onset\nneurodegen"
+  ) %>% 
+  as_tibble %>% 
+  pull(X)
+
+# Run ORA of KEGG pathways
+ORA.network.genes.pan.peurodegen.results = runKEGG(network.genes.pan.neurodegen)
+```
+
+```{r}
+ORA.network.genes.pan.peurodegen.results %>% 
+  as_tibble %>% 
+  mutate(
+    comparison = "Childhood dementia\n&\nadult-onset\nneurodegen"
+  ) %>% 
+  separate(GeneRatio,into = c("temp1", "temp2")) %>% 
+  mutate(GeneRatio = as.numeric(temp1)/as.numeric(temp2)) %>% 
+  group_by(comparison) %>% 
+  dplyr::slice(1:10) %>% 
+  mutate(
+    Description = reorder_within(Description, GeneRatio, comparison), 
+    Description = str_wrap(Description, width = 22)
+  ) %>%
+  ggplot(
+    aes(
+      y = reorder(Description, GeneRatio), x = GeneRatio
+    )
+  ) +
+  geom_col(
+    aes(fill = -log10(p.adjust))
+  ) +
+  scale_y_reordered() +  # This removes the `___comparison` suffix added by reorder_within()
+  scale_fill_viridis_c() +
+  labs(
+    y = "KEGG pathway"
+  ) +
+  facet_wrap(~comparison, 
+             scales = "free_y", nrow = 1)
+```
+
+## ORA of MPO terms
+
+We can also run mouse MPO enrichment analysis
+```{r}
+# this was obtained fromhttps://www.informatics.jax.org/downloads/reports/MGI_PhenoGenoMP.rpt
+
+mm_symbol2mp_id = 
+  read_delim(
+    "data/MPO/HMD_HumanPhenotype.txt", delim = "\t") %>% 
+  dplyr::select(1,4) %>% 
+  set_colnames(
+    c("mm_symbol", "MP_id")
+  ) %>% 
+  mutate(
+    mm_symbol = str_remove(mm_symbol, pattern = "<.+")
+  )
+
+# mpid 2 mp name
+mpo_mgi <- AnnotationDbi::select(
+  MPO.db,
+  keys    = keys(MPO.db, keytype = "mpid"),
+  columns = c("mpid", "term"),
+  keytype = "mpid"
+) %>% 
+  dplyr::select(
+    MP_id = mpid, mp_full_name = term
+  ) %>% 
+  as_tibble
+
+# mouse name to human name
+mm2hs <- homologene(
+  genes  = unique(mm_symbol2mp_id$mm_symbol),
+  inTax  = 10090,  # mouse
+  outTax = 9606    # human
+) %>% 
+  dplyr::select(
+    mm_symbol = `10090`, hs_symbol = `9606`, 
+    mm_entrez = `10090_ID`, hs_entrez = `9606_ID`
+  ) %>% 
+  mutate(across(everything(), as.character)) %>% 
+  as_tibble
+
+# join everything
+mpo.df <- mm_symbol2mp_id %>% 
+   left_join(mpo_mgi) %>% 
+  left_join(mm2hs)
+
+mpo.df.hs.entrez = 
+  mpo.df %>% 
+  dplyr::filter(hs_symbol %in% nodes) %>% 
+  dplyr::select(mp_full_name, hs_entrez) %>% 
+  arrange(mp_full_name)
+
+```
+
+```{r}
+ORA.network.genes.pan.peurodegen.results.MPO <- enricher(
+  gene          = bitr(network.genes.pan.neurodegen, 
+                  fromType = "SYMBOL", toType = "ENTREZID", 
+                  OrgDb ="org.Hs.eg.db") %>% .$ENTREZID,
+  TERM2GENE     = mpo.df.hs.entrez,
+  pvalueCutoff  = 0.05,
+  minGSSize     = 5,
+  maxGSSize     = 500,
+  qvalueCutoff  = 0.05
+)
+
+ORA.network.genes.pan.peurodegen.results.MPO %>% 
+  as_tibble %>% 
+  separate(GeneRatio,into = c("temp1", "temp2")) %>% 
+  mutate(GeneRatio = as.numeric(temp1)/as.numeric(temp2)) %>% 
+  dplyr::slice(1:10) %>% 
+  mutate(
+    Description = str_wrap(Description, width = 22)
+  ) %>%
+  ggplot(
+    aes(
+      y = reorder(Description, GeneRatio), x = GeneRatio
+    )
+  ) +
+  geom_col(
+    aes(fill = -log10(p.adjust))
+  ) +
+  scale_fill_viridis_c() +
+  labs(
+    title = "MPO terms",
+    y = "MPO term"
+  )
+```
+
+### ORA of druggable biology
+```{r}
+drugbank <- readRDS("random/drugbank/joined_atc_df.rds")
+fulldb.drugbank <- readRDS("random/drugbank/fulldb.rds")
+
+# convert symbol to entrez using bit
+drugbank.df.for.ORA = drugbank$identifier %>% 
+  bitr(fromType = "SYMBOL", toType = "ENTREZID", 
+                  OrgDb ="org.Hs.eg.db") %>% 
+  as_tibble %>% 
+  dplyr::rename(identifier = SYMBOL) %>% 
+  left_join(drugbank, by = "identifier") %>% 
+  dplyr::filter(identifier %in% nodes ) %>% 
+  dplyr::select(level_1, ENTREZID) %>% 
+  na.omit(level_1) %>% 
+  unique
+
+
+ORA.network.genes.pan.peurodegen.results.drugbank <- enricher(
+  gene          = bitr(network.genes.pan.neurodegen, 
+                  fromType = "SYMBOL", toType = "ENTREZID", 
+                  OrgDb ="org.Hs.eg.db") %>% .$ENTREZID,
+  TERM2GENE     = drugbank.df.for.ORA,
+  pAdjustMethod = "fdr",
+  minGSSize     = 2,
+  maxGSSize     = 5000,
+)
+
+ORA.network.genes.pan.peurodegen.results.drugbank %>% 
+  setReadable(OrgDb = org.Hs.eg.db, keyType = "ENTREZID") %>% 
+  as_tibble %>% view
+
+drugbank %>% 
+  dplyr::filter(
+    level_1 == "Digitalis glycosides"
+) %>% 
+  .$name.y %>% 
+  unique
+
+drugbank %>% 
+  dplyr::filter(
+    level_1 == "Strophanthus glycosides"
+) %>% 
+  .$name.y %>% 
+  unique
+```
+
+

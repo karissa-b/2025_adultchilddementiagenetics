@@ -1,0 +1,629 @@
+---
+title: "07 PD bulk RNAseq"
+author: "Karissa Barthelson"
+date: "2026-06-11"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+
+# vis
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(UpSetR)
+library(pander)
+library(ggeasy)
+library(ggfortify)
+library(ggpubr)
+library(ggrepel)
+library(grid)
+library(gridExtra)
+library(gridGraphics)
+library(viridis)
+library(tidytext)
+library(pheatmap)
+library(patchwork)
+
+library(tidygraph)
+library(ggraph)
+library(ggforce)
+
+# analysis
+library(edgeR)
+library(limma)
+
+# annotations
+library(org.Hs.eg.db)
+
+# enrichemnt
+library(msigdbr)
+library(clusterProfiler)
+library(gprofiler2)
+library(ReactomePA)
+library(DOSE)
+
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold", colour = "white"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+
+# import data
+Paper: https://link.springer.com/article/10.1007/s00401-023-02597-7
+GEO https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi
+
+raw counts were downloaded from GEO
+
+```{r}
+files = list.files("data/public data/PD bulk brain GSE216281", full.names = T)
+
+samples_paper = read_xlsx(files[1], sheet = "Table S1", skip = 1) %>% 
+  dplyr::rename(sample = 1)
+
+counts =read.table(files[2])
+
+samples = GEOquery::getGEO(filename = files[3]) %>% 
+  pData() %>% 
+  as_tibble() 
+
+samples %<>% 
+  dplyr::select(description, description.1 ) %>% 
+  mutate(
+    sample = str_remove(description, pattern = "Paper ID: ")
+  ) %>% 
+  dplyr::select(-description, sample, library = description.1) %>% 
+  left_join(samples_paper) %>% 
+  mutate(
+    Sex = as.factor(Sex), 
+    age = `Age at death`,
+    diag_sex = paste0(Diagnosis, "_", Sex) %>% 
+      factor(
+        levels = c(
+          "Ctrl_M", "Ctrl_F", 
+          "PD_M", "PD_F", 
+          "PDD_M", "PDD_F", 
+          "iLBD_M", "iLBD_F"
+          )
+      ),
+    `Braak stage` = as.factor(`Braak stage`), 
+    Diagnosis = factor(Diagnosis, levels = c("Ctrl", "PD", "PDD", "iLBD"))
+  ) %>% 
+  dplyr::select(-`Age at death`)
+
+colnames(counts) %in% samples$library %>% summary
+samples$library %in% colnames(counts) %>% summary
+```
+
+```{r}
+gene2ID = AnnotationDbi::select(org.Hs.eg.db,
+  keys = keys(org.Hs.eg.db),
+  columns = c('SYMBOL','ENSEMBL', "GENETYPE", "MAP"),
+  keytype = 'ENTREZID') %>% 
+  as_tibble
+
+# convert gene_id to symbol - easier to deal with later. 
+counts %<>% 
+  rownames_to_column("ENSEMBL") %>% 
+  as_tibble %>% 
+  left_join(gene2ID) %>% 
+  dplyr::distinct(SYMBOL, .keep_all = TRUE) %>% 
+  dplyr::filter(!(is.na(SYMBOL))) %>% 
+  column_to_rownames("SYMBOL") %>% 
+  dplyr::select(-ENTREZID)
+```
+
+
+# Tidy data and build the DGEList
+## gene filtering
+
+```{r}
+x <- counts %>% 
+  DGEList(
+  ) %>% 
+  calcNormFactors()
+
+x$samples %<>% 
+  mutate(library = rownames(.)) %>% 
+  left_join(samples) %>% 
+  droplevels()
+```
+
+```{r}
+# before filtering
+L <- mean(x$samples$lib.size) * 1e-6
+M <- median(x$samples$lib.size) * 1e-6
+c(L, M)
+
+# first filter by expression
+dim(x)
+keep.expr <-
+  filterByExpr(
+    x,
+    group = x$samples$Diagnosis, # by disease groups
+    min.count = M, # min count of the median library size, which should keep genes with at least 1 CPM in 30% of the smallest group
+    min.prop = 0.3 # at least 30% of the smallest group 
+  )
+x <- x[keep.expr, , keep.lib.sizes = FALSE]
+
+x <- calcNormFactors(x, method = "TMM")
+
+dim(x)
+
+x %<>% 
+  na.omit
+
+keep = x$samples %>% 
+  na.omit %>% 
+  .$library
+
+x = x[,keep]
+
+x$genes
+```
+
+
+
+# PCA
+Not particularly informative. just a big blob
+```{r}
+x %>% 
+  cpm(log = TRUE) %>% 
+  t() %>% 
+  prcomp() %>% 
+  autoplot(
+    data = tibble(library = rownames(.$x)) %>% 
+      left_join(x$samples, by = "library"),
+    colour = "diag_sex",
+    shape = "Sex",
+    size = 4
+  ) +
+  theme(aspect.ratio = 1) +
+  labs(colour = "Clinical diagnosis", shape = "Sex") 
+```
+
+# DE analysis
+
+
+```{r}
+design <- model.matrix(
+  ~ 0 + diag_sex + age,
+  data = x$samples, 
+) %>%
+  set_colnames(gsub("diag_sex", "", colnames(.)))
+
+
+contrasts <- makeContrasts(
+  # disease against control, averaged over sex
+  PDvsControl = (PD_M + PD_F)/2 - (Ctrl_M + Ctrl_F)/2,
+  PDDvsControl = (PDD_M + PDD_F)/2 - (Ctrl_M + Ctrl_F)/2,
+  iDLBvsControl = (iLBD_M + iLBD_F)/2 - (Ctrl_M + Ctrl_F)/2,
+  
+  
+  # disease against control within males
+  male_PDvsControl = PD_M - Ctrl_M,
+  male_PDDvsControl  = PDD_M - Ctrl_M,
+  male_iDLBvsControl  = iLBD_M - Ctrl_M,
+
+  # disease against control within feales
+  female_PDvsControl = PD_F - Ctrl_F,
+  female_PDDvsControl  = PDD_F - Ctrl_F,
+  female_iDLBvsControl  = iLBD_F - Ctrl_F,
+  
+  levels = colnames(design)
+)
+
+v <- voomWithQualityWeights(x, design, plot = TRUE)
+
+efit <- v %>%
+  lmFit(design) %>%
+  contrasts.fit(contrasts) %>%
+  eBayes(robust = TRUE)
+
+plotSA(efit, main = "Final model: mean variance trend")
+```
+
+```{r}
+toptables <- colnames(contrasts) %>%
+  sapply(function(coef){
+    topTable(
+      efit,
+      coef = coef,
+      n = Inf,
+      genelist = x$genes %>% mutate(gene_name = rownames(.)),
+      sort.by = "P",
+      confint = TRUE
+    ) %>%
+      as_tibble() %>%
+      mutate(
+        coef = coef,
+        DE = adj.P.Val < 0.05 
+      ) %>%
+      dplyr::select(
+        gene_name, logFC, AveExpr, P.Value, FDR = adj.P.Val, DE, gene_id = ENSEMBL, everything()
+      )
+  }, simplify = FALSE)
+
+toptables$PDvsControl
+
+toptables$PDDvsControl
+toptables$iDLBvsControl
+
+toptables$male_PDDvsControl
+```
+
+# assess LysoPD genes
+```{r}
+lysoPD = read_csv("data/results/adultchildsubtypes v2/CD_1A_lyso_PD/overlapping_nodes_metadata.csv") %>% 
+  dplyr::rename("gene_name" = 1)
+
+check.prop = function(netcoloc.nodes, toptable) {
+  genes.detected = intersect(netcoloc.nodes$gene_name, rownames(x))
+  numDE = intersect(toptable %>%  dplyr::filter(DE == T) %>% .$gene_name, 
+                    genes.detected)
+  length(numDE)/length(genes.detected) %>% 
+  signif(2)
+}
+check.prop(netcoloc.nodes = lysoPD, toptable = toptables$PDvsControl)
+
+```
+
+
+```{r}
+lysoPD %>% 
+  left_join(toptables$PDvsControl) %>% 
+  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
+  na.omit %>% 
+  ggplot(
+    aes(
+      x = z_both, y = -log10(FDR)
+    )
+  ) +
+  geom_point(
+    aes(colour = logFC), 
+    size = 2
+  )  +
+  geom_label_repel(
+    aes(label = gene_name), 
+    data = . %>% 
+      dplyr::filter(z_both > 3 & FDR < 0.05)
+  ) +
+  geom_hline(yintercept = -log10(0.05)) +
+  annotate(
+    geom = "text", 
+    label = "FDR = 0.05", 
+    y = 1.5, x = 58) +
+  scale_alpha_manual(values = c(0.4, 1)) +
+  scale_colour_continuous(palette = "RdBu") +
+  scale_x_continuous(limits = c(0,60)) +
+  labs(
+    x = "Network dual proximity (z)"
+  ) 
+```
+
+
+# Gene set testing
+## Netcoloc communities
+```{r}
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster.PD <- 
+  cluster.gprofiler.results$CD_1A_lyso_PD %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+
+# only retain genes detected in the exp
+network.genes.cluster.PD %<>% 
+  lapply(function(y) {
+    intersect(y ,rownames(x))
+  })
+
+```
+
+```{r}
+logCPM = cpm(x, log=T)
+
+fry.PD <- colnames(contrasts) %>% grep(pattern = "PD", value = T) %>% 
+  sapply(function(y) {
+   logCPM %>% 
+      fry(
+        index = network.genes.cluster.PD,
+        design = design, 
+        contrast = contrasts[,y], 
+        sort = "directional"
+      ) %>% 
+      rownames_to_column("pathway") %>% 
+      as_tibble() %>% 
+      mutate(
+        coef = y)
+  }, simplify = FALSE)
+
+fry.PD$PDvsControl 
+fry.PD$PDDvsControl
+```
+
+# DE analysis by Braak stage
+```{r}
+# x$samples %<>% 
+#   dplyr::rename(braak = `Braak stage`) %>% 
+#   as_tibble
+
+design_v2 = model.matrix(
+  ~0 + braak + age, 
+  data = x$samples
+)
+
+contrasts_v2 <- makeContrasts(
+  #b0 vs all others
+  b1vsb0 = braak1 - braak0,
+  b2vsb0 = braak2 - braak0,
+  b3vsb0 = braak3 - braak0,
+  b4vsb0 = braak4 - braak0,
+  b5vsb0 = braak5 - braak0,
+  b6vsb0 = braak6 - braak0,
+  
+  # combine 0-2, averaged out
+  b3vsb012 = braak3 - (braak0+braak1+braak2)/3,
+  b4vsb012 = braak4 - (braak0+braak1+braak2)/3,
+  b5vsb012 = braak5 - (braak0+braak1+braak2)/3,
+  b6vsb012 = braak6 - (braak0+braak1+braak2)/3,
+  
+    # combine 0-2, averaged out
+  b3vsb012 = braak3 - (braak0+braak1+braak2+braak3)/4,
+  b4vsb012 = braak4 - (braak0+braak1+braak2+braak3)/4,
+  b5vsb012 = braak5 - (braak0+braak1+braak2+braak3)/4,
+  b6vsb012 = braak6 - (braak0+braak1+braak2+braak3)/4,
+  
+  levels = colnames(design_v2)
+)
+
+
+v2 <- voomWithQualityWeights(x, design_v2, plot = F)
+
+efit2 <- v2 %>%
+  lmFit(design_v2) %>%
+  contrasts.fit(contrasts_v2) %>%
+  eBayes(robust = TRUE)
+
+toptables2 <- colnames(contrasts_v2) %>%
+  sapply(function(coef){
+    topTable(
+      efit2,
+      coef = coef,
+      n = Inf,
+      genelist = x$genes %>% mutate(gene_name = rownames(.)),
+      sort.by = "P",
+      confint = TRUE
+    ) %>%
+      as_tibble() %>% 
+      mutate(
+        coef = coef,
+        DE = adj.P.Val < 0.05
+      ) %>%
+        dplyr::select(
+          gene_name, logFC, AveExpr, P.Value, FDR = adj.P.Val, DE, gene_id = ENSEMBL, everything()
+        )
+  }, simplify = FALSE)
+
+toptables2 %>% 
+  lapply(function(y) {
+    y %>% 
+      dplyr::filter(
+        DE == T, 
+        gene_name %in% lysoPD$gene_name
+      )
+  })
+
+toptables2$b2vsb0 %>% 
+  dplyr::filter(DE ==T, gene_name %in% lysoPD$gene_name)
+```
+
+
+```{r}
+# keep = fry.DLB$DLBvsControl %>% 
+#   dplyr::filter(FDR < 0.05) %>% .$pathway
+# 
+# 
+# res = cluster.gprofiler.results$PD %>% 
+#   dplyr::filter(Cluster %in% keep) 
+# 
+# # cluster to gene edges, one row per membership
+# edges <- res %>%
+#   dplyr::select(Cluster, genes) %>%
+#   tidyr::separate_rows(genes, sep = " ") %>%
+#   dplyr::filter(genes != "") %>%
+#   dplyr::rename(from = Cluster, to = genes)
+# 
+# # nodes, with seed status. clusters are their own category.
+# seed_status <- lysoDLB %>%
+#   transmute(
+#     gene_name,
+#     seed = case_when(
+#       d1_seeds == 1 & d2_seeds == 1 ~ "both",
+#       d1_seeds == 1                 ~ "d1",
+#       d2_seeds == 1                 ~ "d2",
+#       TRUE                          ~ "none"
+#     )
+#   )
+# 
+# 
+# nodes <- bind_rows(
+#   res %>% distinct(name = Cluster) %>% mutate(node_type = "cluster"),
+#   edges %>% distinct(name = to) %>% mutate(node_type = "gene")
+# ) %>%
+#   mutate(
+#     seed = case_when(
+#       node_type == "cluster"                  ~ "cluster",
+#       name %in% seed_status$both              ~ "both",
+#       name %in% seed_status$d1                ~ "d1",
+#       name %in% seed_status$d2                ~ "d2",
+#       TRUE                                    ~ "none"
+#     )
+#   )
+# 
+# library(igraph)
+# 
+# # edges, carrying the cluster id so it can drive grouping in Cytoscape
+# edge_tbl <- res %>%
+#   dplyr::select(Cluster, genes) %>%
+#   tidyr::separate_rows(genes, sep = " ") %>%
+#   dplyr::filter(genes != "") %>%
+#   dplyr::rename(from = Cluster, to = genes) %>%
+#   mutate(cluster = from)
+# 
+# # nodes, with seed status, type, label and the top pathway on cluster nodes
+# node_tbl <- bind_rows(
+#   res %>%
+#     transmute(
+#       name = Cluster,
+#       node_type = "cluster",
+#       Top.pathway = if_else(Top.pathway == Cluster, "unannotated", Top.pathway)
+#     ),
+#   edge_tbl %>% distinct(name = to) %>% mutate(node_type = "gene")
+# ) %>%
+#   left_join(seed_status, by = c("name" = "gene_name")) %>%
+#   mutate(
+#     seed = case_when(
+#       node_type == "cluster" ~ "cluster",
+#       is.na(seed)            ~ "none",
+#       TRUE                   ~ seed
+#     ),
+#     label = name
+#   ) %>% 
+#   left_join(
+#     toptables$DLBvsControl %>% 
+#       dplyr::select(name = gene_name, logFC, FDR)
+#   )
+# 
+# g <- graph_from_data_frame(d = edge_tbl, vertices = node_tbl, directed = FALSE)
+# 
+# write_graph(g, "output/lysoDLB_network.graphml", format = "graphml")
+```
+
+
+
+
+<!-- # assess LysoAD genes -->
+<!-- ```{r} -->
+<!-- lysoAD = read_csv("data/results/adultchildsubtypes v2/CD_1A_lyso_AD/overlapping_nodes_metadata.csv") %>%  -->
+<!--   dplyr::rename("gene_name" = 1) -->
+
+<!-- # number of LysoDLB genes detected in the bulk RNAseq exp -->
+<!-- lysoAD.genes.detected = intersect(lysoAD$gene_name, x$genes$gene_name) -->
+<!-- length(lysoAD.genes.detected) -->
+
+<!-- # number of lysoDLB genes DE -->
+<!-- lysoAD.genes.DE.AD = intersect( -->
+<!--   toptables$ADvsControl %>%  -->
+<!--     dplyr::filter(DE == T) %>%  -->
+<!--     .$gene_name,  -->
+<!--   lysoAD.genes.detected -->
+<!--   )  -->
+<!-- length(lysoAD.genes.DE.AD) -->
+
+<!-- # prop of lysoDLB genes DE -->
+<!-- # ~ 37% -->
+<!-- length(lysoAD.genes.DE.AD)/length(lysoAD.genes.detected) %>%  -->
+<!--   signif(1) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- lysoAD %>%  -->
+<!--   left_join(toptables$ADvsControl) %>%  -->
+<!--   ggplot( -->
+<!--     aes( -->
+<!--       x = z_both, y = -log10(FDR) -->
+<!--     ) -->
+<!--   ) + -->
+<!--   geom_point( -->
+<!--     aes(colour = DE) -->
+<!--   )  -->
+<!-- ``` -->
+
+
+# export data for pub
+```{r}
+lysoDLB %>% 
+  left_join(toptables$DLBvsControl) %>% 
+  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
+  na.omit %>% 
+  write_csv("output/bulkseq/lysoDLB_genes.csv")
+```
+
+
+# Figs
+```{r}
+lysoDLB %>% 
+  left_join(toptables$DLBvsControl) %>% 
+  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
+  na.omit %>% 
+  ggplot(
+    aes(
+      x = z_both, y = -log10(FDR)
+    )
+  ) +
+  geom_point(
+    aes(colour = logFC), 
+    size = 2
+  )  +
+  geom_label_repel(
+    aes(label = gene_name), 
+    data = . %>% 
+      dplyr::filter(z_both > 15 & FDR < 0.05)
+  ) +
+  geom_hline(yintercept = -log10(0.05)) +
+  scale_alpha_manual(values = c(0.4, 1)) +
+  scale_colour_continuous(palette = "RdBu") +
+  scale_x_continuous(limits = c(0,55)) +
+  labs(
+    x = "Network dual proximity (z)"
+  ) +
+
+fry.DLB$DLBvsControl %>% 
+  ggplot(
+    aes(
+      x = -log10(PValue), 
+      y = reorder(pathway, -PValue), 
+      fill = FDR < 0.05
+      )
+  ) +
+  geom_col() +
+  scale_fill_manual(values = c("grey50", "red")) +
+  labs(
+    y = "Netcoloc community"
+  ) &
+  theme(
+    text = element_text(size = 18)
+  ) 
+
+  ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf", 
+         width =13, height = 6)
+```
+

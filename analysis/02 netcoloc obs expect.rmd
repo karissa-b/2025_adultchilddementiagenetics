@@ -1,0 +1,385 @@
+---
+title: "02 netcoloc obs expect"
+author: "Karissa Barthelson"
+date: "2026-06-11"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+# Setup
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(ggpubr)
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold", colour = "white"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+
+## Helper functions
+```{r}
+# run KEGG ORA
+runKEGG = function(geneset) {
+
+  uv =   bitr(nodes, 
+                fromType = "SYMBOL", toType = "ENTREZID", 
+                OrgDb ="org.Hs.eg.db") %>% 
+    .$ENTREZID
+  
+  bitr(geneset, 
+       fromType = "SYMBOL", toType = "ENTREZID", 
+     OrgDb ="org.Hs.eg.db") %>% 
+  .$ENTREZID %>%
+  enrichKEGG(
+    organism = 'hsa',
+    universe = uv,
+    pvalueCutoff = 0.05)
+}
+
+```
+
+
+# Pos & neg control colocs
+## import data
+
+Here, I will import the dfs needed for comparing our pos and neg control disease comparisons: 
+
+- AD and PD 
+- ALS and FTLD
+- PD and DLB
+- CD and brain malform (neg control)
+- AD and glioma (neg control)
+for glioma, I obtain Supp Data 1 from here: https://www.nature.com/articles/ng.3823#MOESM53
+
+This is the list of SNPs (germline) which are associated with increased risk for glioma. 
+
+I them took those SNPs and input into gProfiler::SNPense, which tells me which gene the SNPs are in. Only SNPs with a single protein coding gene were kept. 
+
+```{r}
+glioma.snps = read_xlsx("data/glioma/Melin etal 2017 STab1.xlsx", skip = 3) %>% 
+  .$`...2` %>% 
+  na.omit %>% as.vector()
+
+glioma.genes = gprofiler2::gsnpense(glioma.snps) %>% 
+  as_tibble() %>% 
+  .$gene_names
+
+# # write this out for netcoloc. 
+# tibble(GENE = glioma.genes[glioma.genes %in% nodes] %>% unique) %>% 
+#   write_csv("data/genesets/glioma.csv")
+
+```
+
+The input gene lists for the adult onset diseases will be the GWAS 1 hit per loci gene sets
+
+```{r}
+nodes <- readRDS("data/R_objects/network/nodes.rds")
+ 
+enrichment_dfs = list.files("data/results/control contrasts", 
+           full.names = T, recursive = T, 
+           pattern = "network_enrichment.csv") %>% 
+  set_names(basename(dirname(.))) %>% 
+  map(read.csv) %>% 
+  bind_rows(.id = "comparison") %>%
+  dplyr::filter(z_comb == 3, z_12 == 1.5) %>%
+  mutate(
+    FDR = p.adjust(empirical_p, "fdr") %>% signif(2)
+    ) %>% 
+  pivot_longer(
+    cols = c(observed_overlap, expected_overlap_mean),
+    names_to = "type",
+    values_to = "value"
+  ) %>%
+  arrange(desc(FDR)) %>% 
+  mutate(
+    type = recode(
+      type,
+      "observed_overlap" = "observed",
+      "expected_overlap_mean" = "expected"), 
+    comparison = str_replace(comparison, "_", "\n&\n"), 
+    comparison = fct_inorder(comparison)
+
+  )
+```
+## obs vs expected ratio
+```{r}
+enrichment_dfs %>% 
+ ggplot(
+    aes(x = type, y = value, fill = type)
+    ) +
+  geom_bar(
+    stat = "identity", position = "dodge", width = 0.8
+  ) +
+  geom_errorbar(
+    data = . %>% 
+      dplyr::filter(type == "expected"),
+    aes(
+      ymin = value - 2 * expected_overlap_std,
+      ymax = value + 2 * expected_overlap_std),
+    width = 0.25
+  ) + 
+  geom_label(
+    data =  . %>%
+      dplyr::filter(type == "expected"),
+    aes(
+      x = 1.5, y =600,
+      label = paste("p =", FDR)),
+    inherit.aes = FALSE,
+    fill = NA,
+    border.colour = NA,
+    colour = "grey20",
+    size = 5,
+    vjust = 0.2,
+    fontface = "bold",
+    show.legend = FALSE
+  )  +
+  labs(
+    y = "Number of genes", 
+    x = ""
+  ) +
+  facet_wrap(~comparison, nrow = 1, scales = "free") +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("grey50", "skyblue"))+
+   theme(
+    strip.text = element_text(size = 12),
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+   ) 
+```
+
+# OR of top pathways. 
+```{r}
+# read in the genes in the subnets
+subnet.genes = list.files("data/results/control contrasts", 
+           full.names = T, recursive = T, 
+           pattern = "overlapping.+.csv") %>% 
+  set_names(basename(dirname(.))) %>% 
+  map(read.csv) %>% 
+  bind_rows(.id = "comparison") %>% 
+  # only keep sig subnets
+  dplyr::filter(
+    grepl(comparison, pattern = "PD|ALS")
+  ) %>% 
+  split(f = .$comparison) %>% 
+  lapply(pull, "X")
+
+ORA.controls.KEGG.results = subnet.genes %>% 
+  lapply(runKEGG)
+
+p2 = ORA.controls.KEGG.results %>% 
+  map(as_tibble) %>% 
+  bind_rows(.id = "comparison") %>% 
+  separate(GeneRatio,into = c("temp1", "temp2"), remove = F) %>% 
+  separate(BgRatio, into = c("bg1", "bg2"), sep = "/", remove = FALSE) %>% 
+   group_by(comparison) %>% 
+  dplyr::slice(1:7) %>% 
+  mutate(
+    across(c(temp1, temp2, bg1, bg2), as.numeric),
+    
+    a = temp1 + 0.5,
+    b = bg1 - temp1 + 0.5,
+    c = temp2 - temp1 + 0.5,
+    d = bg2 - bg1 - (temp2 - temp1) + 0.5,
+    
+    OR    = (a * d) / (b * c),
+    log2OR = log2(OR),
+    SE    = sqrt(1/a + 1/b + 1/c + 1/d),
+    CI_lo = exp(log(OR) - 1.96 * SE),
+    CI_hi = exp(log(OR) + 1.96 * SE),
+    
+  
+    Description = reorder_within(Description, OR, comparison), 
+    Description = str_wrap(Description, width = 30),
+  
+  
+    GeneRatio = as.numeric(temp1)/as.numeric(temp2), 
+    comparison = str_replace(comparison, pattern = "_", "\n&\n")
+  ) %>% 
+  
+  ggplot(
+    aes(
+      y = reorder(Description, OR), x = log2OR
+    )
+  ) +
+  geom_point(
+    aes(
+      colour = -log10(p.adjust), size = temp1
+      )
+  ) +
+  geom_errorbarh(
+    aes(xmin = log2(CI_lo), xmax = log2(CI_hi)),
+    height = 0.3, linewidth = 0.6
+    ) +
+ #scale_x_continuous(limits = c(0,12))+
+  scale_y_reordered() +  # This removes the `___comparison` suffix added by reorder_within()
+  scale_colour_viridis_c() +
+   geom_vline(xintercept = 1, linetype = "dashed", color = "grey50") +
+  labs(
+    x = "log(OR) ± 95% CI",
+    y = NULL,
+    size = "Gene count"
+  ) +
+  facet_wrap(~comparison, 
+             scales = "free", nrow = 1)+
+   theme(
+    text = element_text(size = 14),
+    legend.position = "top",
+    #axis.title.x = element_blank(),
+    # plot.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+   ) 
+```
+
+# New figure 1
+```{r}
+p1 = enrichment_dfs %>% 
+ ggplot(
+    aes(x = type, y = value, fill = type)
+    ) +
+  geom_bar(
+    stat = "identity", position = "dodge", width = 0.8
+  ) +
+  geom_errorbar(
+    data = . %>% 
+      dplyr::filter(type == "expected"),
+    aes(
+      ymin = value - 2 * expected_overlap_std,
+      ymax = value + 2 * expected_overlap_std),
+    width = 0.25
+  ) + 
+  geom_label(
+    data =  . %>%
+      dplyr::filter(type == "expected"),
+    aes(
+      x = 1.5, y =600,
+      label = paste("p =", FDR)),
+    inherit.aes = FALSE,
+    fill = NA,
+    border.colour = NA,
+    colour = "grey20",
+    size = 5,
+    vjust = 0.8,
+    fontface = "bold",
+    show.legend = FALSE
+  )  +
+  labs(
+    y = "Number of genes", 
+    x = ""
+  ) +
+  facet_wrap(~comparison, nrow = 1, scales = "free") +
+  theme(legend.position = "none") +
+  scale_fill_manual(values = c("grey50", "skyblue"))+
+   theme(
+    strip.text = element_text(size = 12),
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    plot.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+   ) 
+
+p2 = ORA.controls.KEGG.results %>% 
+  map(as_tibble) %>% 
+  bind_rows(.id = "comparison") %>% 
+  separate(GeneRatio,into = c("temp1", "temp2"), remove = F) %>% 
+  separate(BgRatio, into = c("bg1", "bg2"), sep = "/", remove = FALSE) %>% 
+   group_by(comparison) %>% 
+  dplyr::slice(1:7) %>% 
+  mutate(
+    across(c(temp1, temp2, bg1, bg2), as.numeric),
+    
+    a = temp1 + 0.5,
+    b = bg1 - temp1 + 0.5,
+    c = temp2 - temp1 + 0.5,
+    d = bg2 - bg1 - (temp2 - temp1) + 0.5,
+    
+    OR    = (a * d) / (b * c),
+    log2OR = log2(OR),
+    SE    = sqrt(1/a + 1/b + 1/c + 1/d),
+    CI_lo = exp(log(OR) - 1.96 * SE),
+    CI_hi = exp(log(OR) + 1.96 * SE),
+    
+  
+    Description = reorder_within(Description, OR, comparison), 
+    Description = str_wrap(Description, width = 30),
+  
+  
+    GeneRatio = as.numeric(temp1)/as.numeric(temp2), 
+    comparison = str_replace(comparison, pattern = "_", "\n&\n")
+  ) %>% 
+  
+  ggplot(
+    aes(
+      y = reorder(Description, OR), x = log2OR
+    )
+  ) +
+  geom_point(
+    aes(
+      colour = -log10(p.adjust), size = temp1
+      )
+  ) +
+  geom_errorbarh(
+    aes(xmin = log2(CI_lo), xmax = log2(CI_hi)),
+    height = 0.3, linewidth = 0.6
+    ) +
+ #scale_x_continuous(limits = c(0,12))+
+  scale_y_reordered() +  # This removes the `___comparison` suffix added by reorder_within()
+  scale_colour_viridis_c() +
+   geom_vline(xintercept = 1, linetype = "dashed", color = "grey50") +
+  labs(
+    x = "log(OR) ± 95% CI",
+    y = NULL,
+    colour = "-log10(FDR)",
+    size = "Gene count"
+  ) +
+  facet_wrap(~comparison, 
+             scales = "free", nrow = 1)+
+   theme(
+    text = element_text(size = 14),
+    legend.position = "bottom",
+    #axis.title.x = element_blank(),
+    # plot.background = element_blank(),
+    panel.grid = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(), 
+   ) 
+```
+
+```{r}
+ggarrange(
+  p1, p2, 
+  nrow = 2, 
+  labels = "AUTO",
+  heights = c(0.8, 1.2)
+) +
+  ggsave("output/plots4publication/Fig1 control_contrasts.pdf",
+         width = 6, height = 4, 
+         scale = 2)
+```
+
+# export
+```{r}
+ORA.controls.KEGG.results %>% 
+  lapply(as_tibble) %>% 
+  writexl::write_xlsx(
+    "output/spreadsheets/ORA_controls_KEGG_results.xlsx", format_headers = TRUE)
+```
+
+

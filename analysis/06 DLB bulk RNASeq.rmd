@@ -1,0 +1,671 @@
+---
+title: "DLB bulk RNASeq"
+author: "Karissa Barthelson"
+date: "2026-06-11"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+
+# vis
+library(ComplexHeatmap)
+library(circlize)
+library(RColorBrewer)
+library(UpSetR)
+library(pander)
+library(ggeasy)
+library(ggfortify)
+library(ggpubr)
+library(ggrepel)
+library(grid)
+library(gridExtra)
+library(gridGraphics)
+library(viridis)
+library(tidytext)
+library(pheatmap)
+library(patchwork)
+
+library(tidygraph)
+library(ggraph)
+library(ggforce)
+
+# analysis
+library(edgeR)
+library(limma)
+
+# annotations
+library(org.Hs.eg.db)
+
+# enrichemnt
+library(msigdbr)
+library(clusterProfiler)
+library(gprofiler2)
+library(ReactomePA)
+library(DOSE)
+
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold", colour = "white"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+knitr::opts_chunk$set(
+  message = F, echo = F, warning = F
+)
+```
+
+# import data
+Paper: https://academic.oup.com/brain/article/148/1/69/7698452#499652267
+synapse ID: https://www.synapse.org/Synapse:syn59213647
+
+raw counts were downloaded. 
+
+```{r}
+files = list.files("data/public data/DLB bulk RNAseq", full.names = T)
+
+samples_paper = read_xlsx(files[1])
+
+counts = read_delim(files[2])
+genes = read_delim(files[3])
+samples = read_delim(files[4])
+```
+
+# Tidy data and build the DGEList
+```{r}
+# counts matrix, genes as rows, samples as columns
+counts_mat <- counts %>% 
+  column_to_rownames("...1") %>% 
+  as.matrix()
+
+# gene annotation, matched to the count rows
+geneAnno <- genes %>% 
+  dplyr::select(-...1) %>% 
+  dplyr::select(gene_id, seqnames, start, end, strand, 
+                gene_type, gene_name,everything()) %>% 
+  dplyr::filter(gene_id %in% rownames(counts_mat))
+
+
+# obtain sample metadata.
+# fix up colnames
+samples_tidy <- 
+  samples %>% 
+  dplyr::rename(sample = ...1) %>% 
+  mutate(
+    type = case_when(TYPE == "LBD" ~ "DLB", TRUE ~ TYPE),
+    sex = factor(sex_inferred, levels = c("female", "male"))
+  ) %>% 
+  dplyr::select(-TYPE) %>% 
+  dplyr::select(sample, type, everything()) %>% 
+  left_join(
+    # need the batch, but this was only included in the Supp table from the paper
+    samples_paper %>% 
+      dplyr::select(NPID, Flowcell)
+            ) %>% 
+  mutate(
+    batch = as.factor(Flowcell)
+  ) %>% 
+  dplyr::select(-Flowcell)
+```
+
+## gene filtering
+
+Following what they did in the paper. 
+
+Raw counts were normalized to adjust for sample library size differences using the edgeR CPM (counts per million) function.
+
+Counts were filtered to remove mitochondrial genes and keep only expressed protein-coding genes. 
+
+A gene is expressed if at least 70% of the smallest group size has a minimum CPM count of 1. 
+Before filtering, there were 60 649 genes, and post-filtering retained 15 208 expressed protein-coding genes. 
+
+Following filtering, the trimmed mean of values method was used to convert raw library sizes into effective ones.
+
+```{r}
+keep.genes.protein_coding = genes %>% 
+  dplyr::filter(gene_type == "protein_coding") %>% 
+  dplyr::filter(seqnames != "chrM")
+
+x <- counts_mat %>% 
+  DGEList(
+    samples = tibble(sample = colnames(.)) %>% 
+      left_join(samples_tidy, by = "sample") %>% 
+      as_tibble(),
+    genes = tibble(
+      gene_id = rownames(.)) %>% 
+      left_join(geneAnno) %>% 
+      as_tibble
+  ) %>% 
+  calcNormFactors()
+
+x$samples %<>% as_tibble
+x$genes %<>% as_tibble
+```
+
+```{r}
+# before filtering
+L <- mean(x$samples$lib.size) * 1e-6
+M <- median(x$samples$lib.size) * 1e-6
+c(L, M)
+
+# first filter by expression
+dim(x)
+keep.expr <-
+  filterByExpr(
+    x,
+    group = x$samples$type, # by disease groups
+    min.count = M, # min count of the median library size, which should keep genes with at least 1 CPM in 30% of the smallest group
+    min.prop = 0.3 # at least 30% of the smallest group 
+  )
+x <- x[keep.expr, , keep.lib.sizes = FALSE]
+
+# remove mt genes
+removeMT <- x$genes$seqnames != "chrM"  # true when NOT MT
+x <- x[removeMT,,keep.lib.sizes = FALSE]
+
+keepProtein <- x$genes$gene_type == "protein_coding"
+x <- x[keepProtein,,keep.lib.sizes = FALSE]
+x <- calcNormFactors(x, method = "TMM")
+
+dim(x)
+```
+
+
+
+# PCA
+Not particularly informative. just a big blob
+```{r}
+x %>% 
+  cpm(log = TRUE) %>% 
+  t() %>% 
+  prcomp() %>% 
+  autoplot(
+    data = tibble(sample = rownames(.$x)) %>% 
+      left_join(x$samples, by = "sample"),
+    colour = "type",
+    shape = "sex",
+    size = 4
+  ) +
+  theme(aspect.ratio = 1) +
+  labs(colour = "Clinical diagnosis", shape = "Sex") +
+  facet_wrap(~sex)
+```
+
+# DE analysis
+
+```{r}
+# create tyope_sex as per originbal analysis
+x$samples %<>% 
+  mutate(
+    type_sex = paste0(type, "_", sex_inferred) %>% 
+      factor(levels = c(
+        "CONTROL_male",
+        "CONTROL_female",
+        "AD_male",
+        "AD_female",
+        "PA_male",
+        "PA_female",
+        "DLB_male",
+        "DLB_female"
+      ))
+  ) 
+```
+
+```{r biomarker_expression}
+biomarkers <- c("ENO2", "GFAP", "OLIG2", "CD34", "P2RY12")
+for (i in biomarkers) {
+  biomarker <- subset(genes, gene_name == i) # gene of interest 
+  biomarker_counts <- subset(cpm(x, log = T), rownames(cpm(x, log = T)) %in% biomarker)
+  biomarker_melt <- reshape2::melt(biomarker_counts) # reshape data 
+  # rename columns to merge with metadata 
+  names(biomarker_melt)[names(biomarker_melt) == "value"] <- i 
+  # rename columns to merge with metadata 
+  names(biomarker_melt)[names(biomarker_melt) == "Var2"] <- "NPID" 
+  names(biomarker_melt)[names(biomarker_melt) == "Var1"] <- "gene_id"
+  biomarker_melt$gene_id <- NULL
+  assign(paste0(i),biomarker_melt)
+}
+
+# add gene expression values into one dataframe 
+# put all data frames into list
+df_list <- list(ENO2, OLIG2, CD34, P2RY12, GFAP)
+
+cell_biomarker_lcpm = ENO2 %>% 
+  full_join(OLIG2) %>% 
+  full_join(CD34) %>% 
+  full_join(P2RY12) %>% 
+  full_join(GFAP)
+```
+
+# Scale data
+rescaling a predictor in a regression has absolutely no effect on the magnitude of the relation being studied—the slope itself will not change its steepness, nor will the p-values or variance explained be changed. Rescaling is merely a means of communicating the nature of the regression line in different, hopefully more intuitive language.
+```{r scale}
+df <- merge(cell_biomarker_lcpm, x$samples, by = "NPID")
+
+cols_to_scale <- c(
+  "Race_numeric", "RIN", "Age", "PCT_CODING_BASES", "PCT_INTERGENIC_BASES",
+  "PCT_INTRONIC_BASES", "APOE_E4_allele_count", "ENO2", "GFAP", "OLIG2",
+  "CD34", "P2RY12", "Brain.wt"
+)
+
+info_with_scale <- cell_biomarker_lcpm %>% 
+  left_join(x$samples, by = "NPID") %>% 
+  mutate(
+    Race_numeric = as.numeric(as.factor(Race)),
+    APOE_E4_allele_count = str_count(APOE, "4")
+  ) %>% 
+  mutate(across(all_of(cols_to_scale), ~ as.numeric(scale(.))))
+
+all.equal(x$samples$NPID, as.character(info_with_scale$NPID))
+x$samples <- info_with_scale
+```
+
+```{r}
+design <- model.matrix(
+  ~ 0 + type_sex + batch + RIN + Age + PCT_CODING_BASES +
+    PCT_INTERGENIC_BASES + PCT_INTRONIC_BASES + ENO2,
+  data = x$samples
+) %>%
+  set_colnames(gsub("type_sex", "", colnames(.)))
+
+form <- (
+  ~ 0 +
+      type_sex + 
+      batch + 
+      RIN +
+      PCT_CODING_BASES +
+      PCT_INTERGENIC_BASES + 
+      PCT_INTRONIC_BASES +
+      ENO2
+)
+
+contrasts <- makeContrasts(
+  # disease against control, averaged over sex
+  DLBvsControl = (DLB_male + DLB_female)/2 - (CONTROL_male + CONTROL_female)/2,
+  ADvsControl  = (AD_male + AD_female)/2 - (CONTROL_male + CONTROL_female)/2,
+  PAvsControl  = (PA_male + PA_female)/2 - (CONTROL_male + CONTROL_female)/2,
+  DLBvsAD      = (DLB_male + DLB_female)/2 - (AD_male + AD_female)/2,
+  DLBvsPA      = (DLB_male + DLB_female)/2 - (PA_male + PA_female)/2,
+  ADvsPA       = (AD_male + AD_female)/2 - (PA_male + PA_female)/2,
+
+  # disease against control within males
+  male_DLBvsControl = DLB_male - CONTROL_male,
+  male_ADvsControl  = AD_male - CONTROL_male,
+  male_PAvsControl  = PA_male - CONTROL_male,
+
+  # disease against control within females
+  female_DLBvsControl = DLB_female - CONTROL_female,
+  female_ADvsControl  = AD_female - CONTROL_female,
+  female_PAvsControl  = PA_female - CONTROL_female,
+
+  # effect of sex within each group
+  sex_diff_Control = CONTROL_female - CONTROL_male,
+  sex_diff_AD      = AD_female - AD_male,
+  sex_diff_PA      = PA_female - PA_male,
+  sex_diff_DLB     = DLB_female - DLB_male,
+
+  # whether the disease effect differs between the sexes
+  DLBvsControl_sex_interaction = (DLB_female - CONTROL_female) - (DLB_male - CONTROL_male),
+  ADvsControl_sex_interaction  = (AD_female - CONTROL_female) - (AD_male - CONTROL_male),
+  PAvsControl_sex_interaction  = (PA_female - CONTROL_female) - (PA_male - CONTROL_male),
+  DLBvsAD_sex_interaction      = (DLB_female - AD_female) - (DLB_male - AD_male),
+  DLBvsPA_sex_interaction      = (DLB_female - PA_female) - (DLB_male - PA_male),
+  ADvsPA_sex_interaction       = (AD_female - PA_female) - (AD_male - PA_male),
+
+  levels = colnames(design)
+)
+```
+
+```{r}
+voom_cov <-
+  variancePartition::voomWithDreamWeights(
+    counts = x$counts,
+    formula = form,
+    data = x$samples,
+    BPPARAM = BiocParallel::SnowParam(cores),
+    plot = TRUE
+  )
+
+fit <- lmFit(voom_cov, design)
+vfit <- contrasts.fit(fit, contrasts = contrasts)
+veBayesFit <- eBayes(vfit, trend = TRUE, robust=TRUE)
+
+pval <- 0.05
+# lfc.cutoff <- 0.25
+
+sumTable <- 
+  summary(decideTests(
+    veBayesFit,  # object
+    adjust.method = "BH", # by default the method = "separate"
+    p.value = pval,
+    #lfc = lfc.cutoff  # numeric, minimum absolute log2-fold change required
+  ))
+
+allComparisons <- colnames(contrasts)
+
+toptables <- allComparisons %>%
+  sapply(function(coef){
+    topTable(
+      veBayesFit,
+      coef = coef,
+      n = Inf,
+      sort.by = "P",
+      genelist = x$genes,
+      confint = TRUE
+    ) %>%
+      as_tibble() %>%
+      mutate(
+        coef = coef,
+        DE = adj.P.Val < 0.05 
+      ) %>%
+      dplyr::select(
+        gene_name, logFC, AveExpr, P.Value, FDR = adj.P.Val, DE, everything()
+      )
+  }, simplify = FALSE)
+
+toptables$DLBvsControl
+```
+
+# assess LysoDLB genes
+```{r}
+lysoDLB = read_csv("data/results/adultchildsubtypes v2/CD_1A_lyso_DLB/overlapping_nodes_metadata.csv") %>% 
+  dplyr::rename("gene_name" = 1)
+
+check.prop = function(netcoloc.nodes, toptable) {
+  genes.detected = intersect(netcoloc.nodes$gene_name, x$genes$gene_name)
+  numDE = intersect(toptable %>%  dplyr::filter(DE == T) %>% .$gene_name, 
+                    genes.detected)
+  length(numDE)/length(genes.detected) %>% 
+  signif(2)
+}
+check.prop(netcoloc.nodes = lysoDLB, toptable = toptables$DLBvsControl)
+check.prop(netcoloc.nodes = lysoDLB, toptable = toptables$female_DLBvsControl)
+check.prop(netcoloc.nodes = lysoDLB, toptable = toptables$male_DLBvsControl)
+```
+
+```{r}
+toptables$DLBvsControl %>% 
+  dplyr::filter(
+    gene_name %in% lysoDLB$gene_name, 
+    FDR < 0.05
+    ) 
+  
+```
+
+
+```{r}
+lysoDLB %>% 
+  left_join(toptables$DLBvsControl) %>% 
+  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
+  na.omit %>% 
+  ggplot(
+    aes(
+      x = z_both, y = -log10(FDR)
+    )
+  ) +
+  geom_point(
+    aes(colour = logFC), 
+    size = 2
+  )  +
+  geom_label_repel(
+    aes(label = gene_name), 
+    data = . %>% 
+      dplyr::filter(z_both > 15 & FDR < 0.05)
+  ) +
+  geom_hline(yintercept = -log10(0.05)) +
+  annotate(
+    geom = "text", 
+    label = "FDR = 0.05", 
+    y = 1.5, x = 58) +
+  scale_alpha_manual(values = c(0.4, 1)) +
+  scale_colour_continuous(palette = "RdBu") +
+  scale_x_continuous(limits = c(0,60)) +
+  labs(
+    x = "Network dual proximity (z)"
+  ) 
+  ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf", 
+         width =6, height = 5)
+```
+
+
+# Gene set testing
+## Netcoloc communities
+```{r}
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster.DLB <- 
+  cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+```
+
+```{r}
+logCPM = cpm(x, log=T)
+logCPM.gene_name = logCPM %>% 
+  as.data.frame() %>% 
+  rownames_to_column("gene_id") %>% 
+  left_join(x$genes %>% 
+              dplyr::select(gene_id, gene_name)
+            ) %>% 
+  distinct(gene_name, .keep_all = T) %>% 
+  dplyr::select(-gene_id) %>% 
+  column_to_rownames("gene_name")
+
+remove(logCPM)
+
+fry.DLB <- colnames(contrasts) %>% grep(pattern = "DLB", value = T) %>% 
+  sapply(function(y) {
+   logCPM.gene_name %>% 
+      fry(
+        index = network.genes.cluster.DLB,
+        design = design, 
+        contrast = contrasts[,y], 
+        sort = "directional"
+      ) %>% 
+      rownames_to_column("pathway") %>% 
+      as_tibble() %>% 
+      mutate(
+        coef = y)
+  }, simplify = FALSE)
+
+keep = fry.DLB$DLBvsControl %>% 
+  dplyr::filter(FDR < 0.05) %>% .$pathway
+
+
+res = cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::filter(Cluster %in% keep) 
+
+# cluster to gene edges, one row per membership
+edges <- res %>%
+  dplyr::select(Cluster, genes) %>%
+  tidyr::separate_rows(genes, sep = " ") %>%
+  dplyr::filter(genes != "") %>%
+  dplyr::rename(from = Cluster, to = genes)
+
+# nodes, with seed status. clusters are their own category.
+seed_status <- lysoDLB %>%
+  transmute(
+    gene_name,
+    seed = case_when(
+      d1_seeds == 1 & d2_seeds == 1 ~ "both",
+      d1_seeds == 1                 ~ "d1",
+      d2_seeds == 1                 ~ "d2",
+      TRUE                          ~ "none"
+    )
+  )
+
+
+nodes <- bind_rows(
+  res %>% distinct(name = Cluster) %>% mutate(node_type = "cluster"),
+  edges %>% distinct(name = to) %>% mutate(node_type = "gene")
+) %>%
+  mutate(
+    seed = case_when(
+      node_type == "cluster"                  ~ "cluster",
+      name %in% seed_status$both              ~ "both",
+      name %in% seed_status$d1                ~ "d1",
+      name %in% seed_status$d2                ~ "d2",
+      TRUE                                    ~ "none"
+    )
+  )
+
+library(igraph)
+
+# edges, carrying the cluster id so it can drive grouping in Cytoscape
+edge_tbl <- res %>%
+  dplyr::select(Cluster, genes) %>%
+  tidyr::separate_rows(genes, sep = " ") %>%
+  dplyr::filter(genes != "") %>%
+  dplyr::rename(from = Cluster, to = genes) %>%
+  mutate(cluster = from)
+
+# nodes, with seed status, type, label and the top pathway on cluster nodes
+node_tbl <- bind_rows(
+  res %>%
+    transmute(
+      name = Cluster,
+      node_type = "cluster",
+      Top.pathway = if_else(Top.pathway == Cluster, "unannotated", Top.pathway)
+    ),
+  edge_tbl %>% distinct(name = to) %>% mutate(node_type = "gene")
+) %>%
+  left_join(seed_status, by = c("name" = "gene_name")) %>%
+  mutate(
+    seed = case_when(
+      node_type == "cluster" ~ "cluster",
+      is.na(seed)            ~ "none",
+      TRUE                   ~ seed
+    ),
+    label = name
+  ) %>% 
+  left_join(
+    toptables$DLBvsControl %>% 
+      dplyr::select(name = gene_name, logFC, FDR)
+  )
+
+g <- graph_from_data_frame(d = edge_tbl, vertices = node_tbl, directed = FALSE)
+
+write_graph(g, "output/lysoDLB_network.graphml", format = "graphml")
+```
+
+
+
+
+<!-- # assess LysoAD genes -->
+<!-- ```{r} -->
+<!-- lysoAD = read_csv("data/results/adultchildsubtypes v2/CD_1A_lyso_AD/overlapping_nodes_metadata.csv") %>%  -->
+<!--   dplyr::rename("gene_name" = 1) -->
+
+<!-- # number of LysoDLB genes detected in the bulk RNAseq exp -->
+<!-- lysoAD.genes.detected = intersect(lysoAD$gene_name, x$genes$gene_name) -->
+<!-- length(lysoAD.genes.detected) -->
+
+<!-- # number of lysoDLB genes DE -->
+<!-- lysoAD.genes.DE.AD = intersect( -->
+<!--   toptables$ADvsControl %>%  -->
+<!--     dplyr::filter(DE == T) %>%  -->
+<!--     .$gene_name,  -->
+<!--   lysoAD.genes.detected -->
+<!--   )  -->
+<!-- length(lysoAD.genes.DE.AD) -->
+
+<!-- # prop of lysoDLB genes DE -->
+<!-- # ~ 37% -->
+<!-- length(lysoAD.genes.DE.AD)/length(lysoAD.genes.detected) %>%  -->
+<!--   signif(1) -->
+<!-- ``` -->
+
+<!-- ```{r} -->
+<!-- lysoAD %>%  -->
+<!--   left_join(toptables$ADvsControl) %>%  -->
+<!--   ggplot( -->
+<!--     aes( -->
+<!--       x = z_both, y = -log10(FDR) -->
+<!--     ) -->
+<!--   ) + -->
+<!--   geom_point( -->
+<!--     aes(colour = DE) -->
+<!--   )  -->
+<!-- ``` -->
+
+
+# export data for pub
+```{r}
+lysoDLB %>% 
+  left_join(toptables$DLBvsControl) %>% 
+  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
+  na.omit %>% 
+  write_csv("output/bulkseq/lysoDLB_genes.csv")
+```
+
+
+# Figs
+```{r}
+lysoDLB %>% 
+  left_join(toptables$DLBvsControl) %>% 
+  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
+  na.omit %>% 
+  ggplot(
+    aes(
+      x = z_both, y = -log10(FDR)
+    )
+  ) +
+  geom_point(
+    aes(colour = logFC), 
+    size = 2
+  )  +
+  geom_label_repel(
+    aes(label = gene_name), 
+    data = . %>% 
+      dplyr::filter(z_both > 15 & FDR < 0.05)
+  ) +
+  geom_hline(yintercept = -log10(0.05)) +
+  scale_alpha_manual(values = c(0.4, 1)) +
+  scale_colour_continuous(palette = "RdBu") +
+  scale_x_continuous(limits = c(0,55)) +
+  labs(
+    x = "Network dual proximity (z)"
+  ) +
+
+fry.DLB$DLBvsControl %>% 
+  ggplot(
+    aes(
+      x = -log10(PValue), 
+      y = reorder(pathway, -PValue), 
+      fill = FDR < 0.05
+      )
+  ) +
+  geom_col() +
+  scale_fill_manual(values = c("grey50", "red")) +
+  labs(
+    y = "Netcoloc community"
+  ) &
+  theme(
+    text = element_text(size = 18)
+  ) 
+
+  ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf", 
+         width =13, height = 6)
+```
+
