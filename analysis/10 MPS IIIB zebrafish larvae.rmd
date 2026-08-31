@@ -1,7 +1,7 @@
 ---
-title: "06 PD and DLB"
+title: "10 MPS IIIB zebrafish larvae"
 author: "Karissa Barthelson"
-date: "2026-06-11"
+date: "2026-08-31"
 output: workflowr::wflow_html
 editor_options:
   chunk_output_type: console

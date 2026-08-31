@@ -1,0 +1,153 @@
+---
+title: "09 MPS IIIB zf RNAseq"
+author: "Karissa Barthelson"
+date: "2026-08-31"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+The preprocessing etc has already been performed here: 
+
+https://github.com/karissa-b/2021_MPSIIIBvQ96-RNAseq-7dpfLarve
+
+```{r}
+library(tidyverse)
+library(magrittr)
+library(readxl)
+
+library(limma)
+library(edgeR)
+```
+
+
+# read in data
+```{r}
+file = list.files("data/public data/GSE242370 - MPS IIIB zebrafish bulk brain", 
+           full.names = T)
+
+x = file %>% 
+  grep(pattern = "dge", value = T) %>% 
+  readRDS()
+
+toptables = file %>% 
+  grep(pattern = "toptab", value = T) %>%
+  readRDS
+
+logcpm = file %>% 
+  grep(pattern = "cpm", value = T) %>%
+  readRDS
+```
+
+
+# Fry gene set testing on communities
+## convert zf to human IDs 
+
+the netcoloc communities are annoyayed to human gene names. Need to convert the zerbafish ones here. 
+
+```{r}
+zf2hs = homologene::homologene(
+  inTax = "7955", # zebrafish
+  outTax = "9606", # human
+  x$genes$gene_name) %>% 
+  as_tibble() %>% 
+  dplyr::select(
+    gene_name = `7955`, hs_gene_name = `9606`
+  )
+```
+
+## prep inputs
+```{r}
+# create the design matrix
+design.ac <- model.matrix(~genotype, data = x$samples %>% 
+                            droplevels()) %>% # get rid of the unused factor levels
+  set_colnames(gsub(colnames(.), pattern = "genotype", replacement = ""))
+            
+# convert zf ids to hs symbols   
+logcpm %<>% 
+  as_tibble(
+    rownames = "gene_id"
+  ) %>% 
+  left_join(
+    x$genes %>% 
+      dplyr::select(gene_id, gene_name)
+  ) %>% 
+  dplyr::select(-gene_id) %>% 
+  dplyr::select(gene_name, colnames(x))
+
+logcpm %<>% 
+  left_join(zf2hs, relationship = "many-to-many") %>% 
+  mutate(.mean = rowMeans(across(starts_with("AC")))) %>%
+  group_by(hs_gene_name) %>%
+  slice_max(.mean, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  dplyr::select(-.mean) %>% 
+  na.omit %>% 
+  column_to_rownames("hs_gene_name")
+
+## communities
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster.DLB <- 
+  cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+```
+
+## run FRY
+```{r}
+fry.DLB <- colnames(design.ac)[3] %>% 
+ sapply(function(y) {
+    logcpm %>% 
+     dplyr::select(-gene_name) %>% 
+      fry(
+        index = network.genes.cluster.DLB,
+        design = design.ac, 
+        contrast = y, 
+        sort = "mixed"
+      ) %>% 
+      rownames_to_column("pathway") %>% 
+      as_tibble() %>% 
+      mutate(coef = y)
+  }, simplify = FALSE)
+```
+
+## export
+
+```{r}
+# export toptable
+toptables$`MPS-III` %>% 
+  dplyr::select(
+    symbol = gene_name, logFC, pval = PValue, FDR, DE
+  ) %>% 
+  writexl::write_xlsx("data/public data/processed/GSE242370_toptable_lysoMPSIIIB_dr_bulk_brain.xlsx")
+
+# export fry object
+fry.DLB$MPSIIIB %>% 
+  saveRDS("data/public data/processed/GSE242370_fry_lysoMPSIIIB_dr_bulk_brain.rds")
+```
+
+
+
+
+
+
+
+
+

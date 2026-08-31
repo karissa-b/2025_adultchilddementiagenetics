@@ -69,7 +69,7 @@ synapse ID: https://www.synapse.org/Synapse:syn59213647
 raw counts were downloaded. 
 
 ```{r}
-files = list.files("data/public data/DLB bulk RNAseq", full.names = T)
+files = list.files("data/public data/syn52394100 - DLB bulk RNAseq", full.names = T)
 
 samples_paper = read_xlsx(files[1])
 
@@ -201,7 +201,7 @@ x %>%
 # DE analysis
 
 ```{r}
-# create tyope_sex as per originbal analysis
+# create tyope_sex as per original analysis
 x$samples %<>% 
   mutate(
     type_sex = paste0(type, "_", sex_inferred) %>% 
@@ -246,6 +246,7 @@ cell_biomarker_lcpm = ENO2 %>%
 
 # Scale data
 rescaling a predictor in a regression has absolutely no effect on the magnitude of the relation being studied—the slope itself will not change its steepness, nor will the p-values or variance explained be changed. Rescaling is merely a means of communicating the nature of the regression line in different, hopefully more intuitive language.
+
 ```{r scale}
 df <- merge(cell_biomarker_lcpm, x$samples, by = "NPID")
 
@@ -268,6 +269,7 @@ x$samples <- info_with_scale
 ```
 
 ```{r}
+# design matrix matched by original authors
 design <- model.matrix(
   ~ 0 + type_sex + batch + RIN + Age + PCT_CODING_BASES +
     PCT_INTERGENIC_BASES + PCT_INTRONIC_BASES + ENO2,
@@ -382,7 +384,7 @@ check.prop = function(netcoloc.nodes, toptable) {
   genes.detected = intersect(netcoloc.nodes$gene_name, x$genes$gene_name)
   numDE = intersect(toptable %>%  dplyr::filter(DE == T) %>% .$gene_name, 
                     genes.detected)
-  length(numDE)/length(genes.detected) %>% 
+  length(numDE)*100/length(genes.detected) %>% 
   signif(2)
 }
 check.prop(netcoloc.nodes = lysoDLB, toptable = toptables$DLBvsControl)
@@ -396,7 +398,6 @@ toptables$DLBvsControl %>%
     gene_name %in% lysoDLB$gene_name, 
     FDR < 0.05
     ) 
-  
 ```
 
 
@@ -417,7 +418,7 @@ lysoDLB %>%
   geom_label_repel(
     aes(label = gene_name), 
     data = . %>% 
-      dplyr::filter(z_both > 15 & FDR < 0.05)
+      dplyr::filter(z_both > 10 & FDR < 0.05)
   ) +
   geom_hline(yintercept = -log10(0.05)) +
   annotate(
@@ -430,8 +431,8 @@ lysoDLB %>%
   labs(
     x = "Network dual proximity (z)"
   ) 
-  ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf", 
-         width =6, height = 5)
+  # ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf", 
+  #        width =6, height = 5)
 ```
 
 
@@ -489,84 +490,84 @@ fry.DLB <- colnames(contrasts) %>% grep(pattern = "DLB", value = T) %>%
         coef = y)
   }, simplify = FALSE)
 
-keep = fry.DLB$DLBvsControl %>% 
-  dplyr::filter(FDR < 0.05) %>% .$pathway
-
-
-res = cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
-  dplyr::filter(Cluster %in% keep) 
-
-# cluster to gene edges, one row per membership
-edges <- res %>%
-  dplyr::select(Cluster, genes) %>%
-  tidyr::separate_rows(genes, sep = " ") %>%
-  dplyr::filter(genes != "") %>%
-  dplyr::rename(from = Cluster, to = genes)
-
-# nodes, with seed status. clusters are their own category.
-seed_status <- lysoDLB %>%
-  transmute(
-    gene_name,
-    seed = case_when(
-      d1_seeds == 1 & d2_seeds == 1 ~ "both",
-      d1_seeds == 1                 ~ "d1",
-      d2_seeds == 1                 ~ "d2",
-      TRUE                          ~ "none"
-    )
-  )
-
-
-nodes <- bind_rows(
-  res %>% distinct(name = Cluster) %>% mutate(node_type = "cluster"),
-  edges %>% distinct(name = to) %>% mutate(node_type = "gene")
-) %>%
-  mutate(
-    seed = case_when(
-      node_type == "cluster"                  ~ "cluster",
-      name %in% seed_status$both              ~ "both",
-      name %in% seed_status$d1                ~ "d1",
-      name %in% seed_status$d2                ~ "d2",
-      TRUE                                    ~ "none"
-    )
-  )
-
-library(igraph)
-
-# edges, carrying the cluster id so it can drive grouping in Cytoscape
-edge_tbl <- res %>%
-  dplyr::select(Cluster, genes) %>%
-  tidyr::separate_rows(genes, sep = " ") %>%
-  dplyr::filter(genes != "") %>%
-  dplyr::rename(from = Cluster, to = genes) %>%
-  mutate(cluster = from)
-
-# nodes, with seed status, type, label and the top pathway on cluster nodes
-node_tbl <- bind_rows(
-  res %>%
-    transmute(
-      name = Cluster,
-      node_type = "cluster",
-      Top.pathway = if_else(Top.pathway == Cluster, "unannotated", Top.pathway)
-    ),
-  edge_tbl %>% distinct(name = to) %>% mutate(node_type = "gene")
-) %>%
-  left_join(seed_status, by = c("name" = "gene_name")) %>%
-  mutate(
-    seed = case_when(
-      node_type == "cluster" ~ "cluster",
-      is.na(seed)            ~ "none",
-      TRUE                   ~ seed
-    ),
-    label = name
-  ) %>% 
-  left_join(
-    toptables$DLBvsControl %>% 
-      dplyr::select(name = gene_name, logFC, FDR)
-  )
-
-g <- graph_from_data_frame(d = edge_tbl, vertices = node_tbl, directed = FALSE)
-
-write_graph(g, "output/lysoDLB_network.graphml", format = "graphml")
+# keep = fry.DLB$DLBvsControl %>% 
+#   dplyr::filter(FDR < 0.05) %>% .$pathway
+# 
+# 
+# res = cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+#   dplyr::filter(Cluster %in% keep) 
+# 
+# # cluster to gene edges, one row per membership
+# edges <- res %>%
+#   dplyr::select(Cluster, genes) %>%
+#   tidyr::separate_rows(genes, sep = " ") %>%
+#   dplyr::filter(genes != "") %>%
+#   dplyr::rename(from = Cluster, to = genes)
+# 
+# # nodes, with seed status. clusters are their own category.
+# seed_status <- lysoDLB %>%
+#   transmute(
+#     gene_name,
+#     seed = case_when(
+#       d1_seeds == 1 & d2_seeds == 1 ~ "both",
+#       d1_seeds == 1                 ~ "d1",
+#       d2_seeds == 1                 ~ "d2",
+#       TRUE                          ~ "none"
+#     )
+#   )
+# 
+# 
+# nodes <- bind_rows(
+#   res %>% distinct(name = Cluster) %>% mutate(node_type = "cluster"),
+#   edges %>% distinct(name = to) %>% mutate(node_type = "gene")
+# ) %>%
+#   mutate(
+#     seed = case_when(
+#       node_type == "cluster"                  ~ "cluster",
+#       name %in% seed_status$both              ~ "both",
+#       name %in% seed_status$d1                ~ "d1",
+#       name %in% seed_status$d2                ~ "d2",
+#       TRUE                                    ~ "none"
+#     )
+#   )
+# 
+# library(igraph)
+# 
+# # edges, carrying the cluster id so it can drive grouping in Cytoscape
+# edge_tbl <- res %>%
+#   dplyr::select(Cluster, genes) %>%
+#   tidyr::separate_rows(genes, sep = " ") %>%
+#   dplyr::filter(genes != "") %>%
+#   dplyr::rename(from = Cluster, to = genes) %>%
+#   mutate(cluster = from)
+# 
+# # nodes, with seed status, type, label and the top pathway on cluster nodes
+# node_tbl <- bind_rows(
+#   res %>%
+#     transmute(
+#       name = Cluster,
+#       node_type = "cluster",
+#       Top.pathway = if_else(Top.pathway == Cluster, "unannotated", Top.pathway)
+#     ),
+#   edge_tbl %>% distinct(name = to) %>% mutate(node_type = "gene")
+# ) %>%
+#   left_join(seed_status, by = c("name" = "gene_name")) %>%
+#   mutate(
+#     seed = case_when(
+#       node_type == "cluster" ~ "cluster",
+#       is.na(seed)            ~ "none",
+#       TRUE                   ~ seed
+#     ),
+#     label = name
+#   ) %>% 
+#   left_join(
+#     toptables$DLBvsControl %>% 
+#       dplyr::select(name = gene_name, logFC, FDR)
+#   )
+# 
+# g <- graph_from_data_frame(d = edge_tbl, vertices = node_tbl, directed = FALSE)
+# 
+# write_graph(g, "output/lysoDLB_network.graphml", format = "graphml")
 ```
 
 
@@ -610,62 +611,67 @@ write_graph(g, "output/lysoDLB_network.graphml", format = "graphml")
 <!-- ``` -->
 
 
-# export data for pub
+# export data 
 ```{r}
-lysoDLB %>% 
-  left_join(toptables$DLBvsControl) %>% 
-  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
-  na.omit %>% 
-  write_csv("output/bulkseq/lysoDLB_genes.csv")
+toptables$DLBvsControl %>% 
+  dplyr::select(symbol = gene_name, logFC, pval = P.Value,FDR, DE) %>% 
+  write.csv("data/public data/processed/syn5239400_toptable_DLBvCont_hs_bulk.csv")
+
+fry.DLB %>% 
+  saveRDS("data/public data/processed/syn5239400_fry_DLBvCont_hs_bulk.rds")
+```
+# session info
+```{r}
+sessionInfo()
 ```
 
 
-# Figs
-```{r}
-lysoDLB %>% 
-  left_join(toptables$DLBvsControl) %>% 
-  dplyr::select(gene_name, FDR, z_both, DE, logFC) %>% 
-  na.omit %>% 
-  ggplot(
-    aes(
-      x = z_both, y = -log10(FDR)
-    )
-  ) +
-  geom_point(
-    aes(colour = logFC), 
-    size = 2
-  )  +
-  geom_label_repel(
-    aes(label = gene_name), 
-    data = . %>% 
-      dplyr::filter(z_both > 15 & FDR < 0.05)
-  ) +
-  geom_hline(yintercept = -log10(0.05)) +
-  scale_alpha_manual(values = c(0.4, 1)) +
-  scale_colour_continuous(palette = "RdBu") +
-  scale_x_continuous(limits = c(0,55)) +
-  labs(
-    x = "Network dual proximity (z)"
-  ) +
+<!-- # Figs -->
+<!-- ```{r} -->
+<!-- lysoDLB %>%  -->
+<!--   left_join(toptables$DLBvsControl) %>%  -->
+<!--   dplyr::select(gene_name, FDR, z_both, DE, logFC) %>%  -->
+<!--   na.omit %>%  -->
+<!--   ggplot( -->
+<!--     aes( -->
+<!--       x = z_both, y = -log10(FDR) -->
+<!--     ) -->
+<!--   ) + -->
+<!--   geom_point( -->
+<!--     aes(colour = logFC),  -->
+<!--     size = 2 -->
+<!--   )  + -->
+<!--   geom_label_repel( -->
+<!--     aes(label = gene_name),  -->
+<!--     data = . %>%  -->
+<!--       dplyr::filter(z_both > 15 & FDR < 0.05) -->
+<!--   ) + -->
+<!--   geom_hline(yintercept = -log10(0.05)) + -->
+<!--   scale_alpha_manual(values = c(0.4, 1)) + -->
+<!--   scale_colour_continuous(palette = "RdBu") + -->
+<!--   scale_x_continuous(limits = c(0,55)) + -->
+<!--   labs( -->
+<!--     x = "Network dual proximity (z)" -->
+<!--   ) + -->
 
-fry.DLB$DLBvsControl %>% 
-  ggplot(
-    aes(
-      x = -log10(PValue), 
-      y = reorder(pathway, -PValue), 
-      fill = FDR < 0.05
-      )
-  ) +
-  geom_col() +
-  scale_fill_manual(values = c("grey50", "red")) +
-  labs(
-    y = "Netcoloc community"
-  ) &
-  theme(
-    text = element_text(size = 18)
-  ) 
+<!-- fry.DLB$DLBvsControl %>%  -->
+<!--   ggplot( -->
+<!--     aes( -->
+<!--       x = -log10(PValue),  -->
+<!--       y = reorder(pathway, -PValue),  -->
+<!--       fill = FDR < 0.05 -->
+<!--       ) -->
+<!--   ) + -->
+<!--   geom_col() + -->
+<!--   scale_fill_manual(values = c("grey50", "red")) + -->
+<!--   labs( -->
+<!--     y = "Netcoloc community" -->
+<!--   ) & -->
+<!--   theme( -->
+<!--     text = element_text(size = 18) -->
+<!--   )  -->
 
-  ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf", 
-         width =13, height = 6)
-```
+<!--   ggsave("output/plots4publication/Lyso_DLB_DLB_bulk_genezvFDR.pdf",  -->
+<!--          width =13, height = 6) -->
+<!-- ``` -->
 

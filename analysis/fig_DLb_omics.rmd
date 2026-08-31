@@ -1,0 +1,181 @@
+---
+title: "fig_DLB_omics"
+author: "Karissa Barthelson"
+date: "2026-08-31"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(magrittr)
+library(readxl)
+
+library(ComplexHeatmap)
+library(circlize)
+```
+
+Here, I will make the figure for the heatmap summairising the changes to the LysoDLB genes across several RNAseq datasets
+
+# Import toptables
+```{r}
+all.toptable.filepaths = list.files(
+  "data/public data/processed", 
+  pattern = "toptable", 
+  full.names = T) 
+
+toptables = list(
+  DLB.hs.ACC = read_csv("data/public data/processed/syn5239400_toptable_DLBvCont_hs_bulk_ACC.csv", 
+                        col_select = -1) %>% 
+    mutate(
+      FDR = p.adjust(pval, "fdr"), 
+      .after = "pval"
+    ), 
+  
+  DLB.PFC = read_csv("data/public data/processed/GSE150696_toptable_DLBvCont_hs_bulk_PFC.csv",   
+                        col_select = -1), 
+  
+  MPSIIIA.wholeBrain = read_xlsx("data/public data/processed/GSE244310_toptable_lysoMPSIIIAC_dr_bulk_brain.xlsx", sheet = "MPS IIIA"), 
+  
+  MPSIIIC.wholeBrain = read_xlsx("data/public data/processed/GSE244310_toptable_lysoMPSIIIAC_dr_bulk_brain.xlsx", sheet = "MPS IIIC"), 
+  
+  MPSIIIB.wholeBrain = read_xlsx("data/public data/processed/GSE242370_toptable_lysoMPSIIIB_dr_bulk_brain.xlsx"), 
+  
+  MPSIIIB.larvae = read_xlsx("data/public data/processed/GSE217196_toptable_lysoMPSIIIB_dr_bulkLarvae.xlsx")
+
+  ) 
+```
+
+## convert zf to human
+```{r}
+
+
+convertzf2Hs = function(toptable) {
+  
+  zf2hs = homologene::homologene(
+  inTax = "7955", # zebrafish
+  outTax = "9606", # human
+  toptable$symbol
+  ) %>% 
+  as_tibble() %>% 
+  dplyr::select(
+    symbol = `7955`, hs_gene_name = `9606`
+  )
+  
+  toptable %>% 
+    left_join(zf2hs) %>%
+    dplyr::select(-symbol) %>%
+    na.omit() %>%
+    dplyr::select(symbol = hs_gene_name, everything()) %>%
+    group_by(symbol) %>%
+    slice_max(order_by = tibble(DE, abs(logFC)), n = 1, with_ties = FALSE) %>%
+    ungroup()
+}
+  
+toptables$MPSIIIB.wholeBrain <- convertzf2Hs(toptables$MPSIIIB.wholeBrain)  
+toptables$MPSIIIA.wholeBrain <- convertzf2Hs(toptables$MPSIIIA.wholeBrain)  
+toptables$MPSIIIC.wholeBrain <- convertzf2Hs(toptables$MPSIIIC.wholeBrain)  
+toptables$MPSIIIB.larvae <- convertzf2Hs(toptables$MPSIIIB.larvae)  
+ 
+```
+
+
+# import lysoDLB genes
+```{r}
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/overlapping_nodes_metadata.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster.DLB <- 
+  cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+```
+
+# heatmap building
+
+```{r}
+dat <- toptables %>%
+  bind_rows(.id = "dataset") %>%
+  dplyr::filter(symbol %in% node_metadata$CD_1A_lyso_DLB$X)
+
+# logFC matrix: genes x datasets
+fc <- dat %>%
+  dplyr::select(symbol, dataset, logFC) %>%
+  pivot_wider(names_from = dataset, values_from = logFC) %>%
+  column_to_rownames("symbol") %>%
+  as.matrix()
+
+# DE matrix, same shape, for the asterisks
+de <- dat %>%
+  dplyr::select(symbol, dataset, DE) %>%
+  pivot_wider(names_from = dataset, values_from = DE) %>%
+  column_to_rownames("symbol") %>%
+  as.matrix()
+de <- de[rownames(fc), colnames(fc)]  
+
+lim <- max(abs(fc), na.rm = TRUE)
+col_fun <- colorRamp2(c(-1, 0, 1), c("#053061", "white", "#67001F"))
+
+
+# only retain genes DE in at least one dataset
+keep <- rownames(de)[rowSums(de, na.rm = TRUE) >= 2]
+
+fc <- fc[keep, ]
+de <- de[keep, ]
+
+# compute disances. 
+d <- dist(fc)                        # pairwise-complete; some entries may be NA
+d[is.na(d)] <- max(d, na.rm = TRUE)  # genes sharing no datasets = maximally distant
+row_hc <- hclust(d, method = "average")
+
+Heatmap(
+  fc,                                # original matrix, NAs intact
+  name = "logFC",
+  col = col_fun,
+  na_col = "grey30",                 # NAs render grey
+  cluster_rows = row_hc,             # precomputed, NA-safe tree
+  cluster_columns = F,
+  cell_fun = function(j, i, x, y, w, h, fill) {
+    if (isTRUE(de[i, j])) grid.text("x", x, y, gp = gpar(fontsize = 10))
+  },
+  column_names_gp = gpar(fontsize = 8),
+  row_names_gp = gpar(fontsize = 10),
+)
+```
+
+
+
+

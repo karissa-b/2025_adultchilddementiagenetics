@@ -63,42 +63,7 @@ knitr::opts_chunk$set(
 
 # Introduction
 Here will be the analysis of netcoloc in the story of the paper. 
-
 # gene sets
-```{r}
-genesets <- list.files(
-  path = "data/genesets/v2/adultchildsubtypes",
-  # pattern = ".csv",
-  full.names = TRUE
-) %>% 
-  sapply(function(x) {
-    x %>% 
-      read_csv() %>% 
-      pull(1)
-  }, simplify = F) %>% 
-  setNames(names(.) %>% 
-             str_remove(pattern = "data/genesets/v2/adultchildsubtypes/") %>% 
-             str_remove(pattern = ".csv") %>% 
-             str_remove(pattern = "_v2_list.txt") 
-           )
-
-genesets %>% 
-  lapply(length) %>% 
-  stack
-```
-
-```{r}
-CD.all = genesets[genesets %>% names %>% grep(pattern = "^CD", value = T)] %>% stack
-adult.all = genesets[genesets %>% names %>% grep(pattern = "AD|PD|ALS|FTLD|DLB", value = T)] %>% stack 
-
-shared.genes = intersect(CD.all$values, adult.all$values) 
-
-CD.all %>% 
-  bind_rows(adult.all) %>% 
-  dplyr::filter(values %in% shared.genes) %>%
-  arrange(values) %>% view
-  pivot_wider(names_from = "ind", values_from = "ind")
-```
 
 
 ## Pos & neg control colocs
@@ -115,13 +80,15 @@ Here, I will import the dfs needed for comparing our pos and neg control disease
 The input gene lists for the adult onset diseases will be the GWAS 1 hit per loci gene sets
 
 ```{r}
+nodes <- readRDS("data/R_objects/network/nodes.rds")
 
 paths.netcolc = c(
   AD_PD = "data/results/pan neurodegen analysis - adult v2/AD_PD/network_enrichment.csv",
-  CD.lyso_nonCD.lyso = "data/results/CD subtypes and non neurodegen IEMs/CD_1A_lyso_nonCD_lyso/network_colocalization_enrichment.csv", 
-  CD.amino_nonCD.amino = "data/results/CD subtypes and non neurodegen IEMs/CD_1C_aminoacids_aminoacidopathy/network_colocalization_enrichment.csv", 
-  CD.perox_nonCD.perox =  "data/results/CD subtypes and non neurodegen IEMs/CD_1F_perox_peroxisomal/network_colocalization_enrichment.csv",
-  CD.mito_nonCD.mito = "data/results/CD subtypes and non neurodegen IEMs/CD_1G_mito_mitochondrial/network_colocalization_enrichment.csv",
+  #AD_T1D = "data/results/AD only/AD_T1D/network_enrichment.csv",
+  # CD.lyso_nonCD.lyso = "data/results/CD subtypes and non neurodegen IEMs/CD_1A_lyso_nonCD_lyso/network_colocalization_enrichment.csv", 
+  # CD.amino_nonCD.amino = "data/results/CD subtypes and non neurodegen IEMs/CD_1C_aminoacids_aminoacidopathy/network_colocalization_enrichment.csv", 
+  # CD.perox_nonCD.perox =  "data/results/CD subtypes and non neurodegen IEMs/CD_1F_perox_peroxisomal/network_colocalization_enrichment.csv",
+  # CD.mito_nonCD.mito = "data/results/CD subtypes and non neurodegen IEMs/CD_1G_mito_mitochondrial/network_colocalization_enrichment.csv",
   CD.all_brain.malform = "data/results/pan neurodegen analysis - adult v2/CD_all_brain_malform/network_enrichment.csv")
 
 enrichment_dfsv1 <- paths.netcolc %>% 
@@ -254,28 +221,10 @@ network.genes.pos.controls <- c(
   })
 
 # the background gene set will be all genes found in the PCNet, as these are the ones I am analysing. The node info was obtained from NDex. 
-nodes <- readRDS("data/R_objects/network/nodes.rds")
+
 ```
 
-## run ORA on whole subnetworks
-```{r}
-runKEGG = function(geneset) {
 
-  uv =   bitr(nodes, 
-                fromType = "SYMBOL", toType = "ENTREZID", 
-                OrgDb ="org.Hs.eg.db") %>% 
-    .$ENTREZID
-  
-  bitr(geneset, 
-       fromType = "SYMBOL", toType = "ENTREZID", 
-     OrgDb ="org.Hs.eg.db") %>% 
-  .$ENTREZID %>%
-  enrichKEGG(
-    organism = 'hsa',
-    universe = uv,
-    pvalueCutoff = 0.05)
-}
-```
 
 ```{r}
 ORA.network.genes.poscontrols.results <- network.genes.pos.controls %>% 
@@ -634,14 +583,6 @@ genesets_v2 = list.files("data/genesets/v2/adultchildsubtypes", full.names = T) 
       str_remove("_list.txt") %>% 
       str_remove("_v2")
   )
-
-genesets_v2$ALS %>% arrange(Gene)
-  lapply(function(x) {
-    x %>% 
-    dplyr::filter(
-      grepl(Gene, pattern = "SNCA")
-      )
-    })
 ```
 
 ## plot the obs v exp ratio
@@ -929,6 +870,7 @@ ORA.results.genes.in.communities$lysoDLB$C438 %>%
 ```
 
 ## ORA drugbank on communiities
+
 ```{r}
 # take the communities in the sig subnets and perform ORA
 test = communities[keep.subnets] %>% 
@@ -964,10 +906,26 @@ test2 = test %>%
       }, simplify = F) %>% 
       bind_rows(.id = "community") 
   })
+
+test2 %>% bind_rows(.id = "subnet") 
+
+test2$CD_1A_lyso_PD %>% 
+  dplyr::select(community, ID, geneID) %>% 
+  mutate(geneID = str_split(geneID, pattern = "/")) %>% 
+  .$geneID %>% 
+  unlist %>% 
+  unique -> PD.genes
+
+drugbank %>% 
+  dplyr::filter(identifier %in% PD.genes) %>% 
+  .$drugbank_id %>% unique %>% length
 ```
 
 
 ```{r}
+test$CD_1A_lyso_AD %>% 
+  
+  bind_rows()
 
 ```
 

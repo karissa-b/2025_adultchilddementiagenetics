@@ -1,0 +1,741 @@
+---
+title: "06 DLB,PD,AD microarray PFC"
+author: "Karissa Barthelson"
+date: "2026-08-28"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+```{r}
+library(tidyverse)
+library(magrittr)
+
+library(arrayQualityMetrics)
+library(GEOquery) # for series matrix reading
+library(oligo) # for microarray analysis
+library(limma) # for DE testing
+library(hta20transcriptcluster.db)
+
+library(ggeasy)
+library(ggrepel)
+library(ggfortify)
+library(viridis)
+library(ggpubr)
+library(patchwork)
+
+theme_set(theme_pubr())
+```
+
+# read in data
+
+## raw expression intensities
+Raw .cel files obtained from GEO (accession GSE150696)
+
+
+```{r}
+file.paths.cel= "data/public data/GSE150696 DLB PFC microarray/GSE150696_RAW/"
+geo_accession = "GSE150696"
+
+# read in the raw microarray data obtained from GEO
+raw <- read.celfiles(
+  list.celfiles(file.paths.cel, full.names = TRUE,listGzipped = T)
+  )
+```
+
+## series matrix from GEO
+
+Phenotype data of the samples was accessed from the GEO record. 
+
+Note one PDD sample had no pmi information. keep in mind for later. if including pmi in the design matrix, i will have to drop it.  
+
+```{r}
+geo = GEOquery::getGEO(geo_accession)
+  
+meta = geo$GSE150696_series_matrix.txt.gz %>% 
+  pData %>% 
+  as_tibble %>%
+  dplyr::select(
+    title, geo_accession, age = "age:ch1", pmi = "pmi:ch1", sex = "Sex:ch1"
+  ) %>% 
+  mutate(
+    disease = str_extract(title, pattern = "AD|CTRL|DLB|PDD"), 
+    sex = str_extract(sex, pattern = "M|F"),
+    age = as.numeric(age), 
+    pmi = as.numeric(pmi),
+    group = paste0(disease, "_", sex), 
+    disease = factor(disease, levels = c("CTRL", "DLB", "PDD", "AD")), 
+    group = factor(group, levels = c("CTRL_M", "CTRL_F", "DLB_M", "DLB_F", "PDD_M", "PDD_F", "AD_M", "AD_F"))
+    
+    )
+```
+
+
+## prepare eset
+
+cel files are summarised to gene level expression levels. 
+probe and patient info is placed into the eset. 
+
+```{r}
+# summarise to gene level (target = core). 
+# background removal using RMA
+# normalised using median polish
+eset <- rma(raw, target = "core")
+
+# tidy up colanmes for ease of use later 
+colnames(eset) %<>% 
+  str_remove("_.+$")
+
+# add pheno information to the eset object
+pData(eset) %<>% 
+  as.data.frame() %>% 
+  mutate(
+    temp = rownames(.),
+    geo_accession = str_extract(rownames(.), pattern = "^GSM.{7}")
+  ) %>%  
+  left_join(meta, by= "geo_accession") %>% 
+  column_to_rownames("temp")
+
+```
+
+
+## probe annotations
+
+I need gene symbols for downstream analysis. obtained this using the hta20transcriptcluster.db pkg
+
+[HTA-2_0] Affymetrix Human Transcriptome Array 2.0 [probe set (exon) version]
+
+
+```{r}
+fData(eset)$symbol   <- mapIds(hta20transcriptcluster.db,  rownames(eset),
+                               column = "SYMBOL",   keytype = "PROBEID", multiVals = "first")
+fData(eset)$genename <- mapIds(hta20transcriptcluster.db,  rownames(eset),
+                               column = "GENENAME", keytype = "PROBEID", multiVals = "first")
+fData(eset)$genetype <- mapIds(hta20transcriptcluster.db,  rownames(eset),
+                               column = "GENETYPE", keytype = "PROBEID", multiVals = "first")
+
+# also using this from geo, since i cant find this info in the annotationDBI anno
+probe.anno = data.table::fread("data/public data/GSE150696 DLB PFC microarray/GPL17585-45238.txt", skip = 14)
+```
+
+# QC using arrayQualityMetrics
+
+Next I will use the `arrayQualityMetrics` package for more  generate a report for assistance in detecting outliers.  It will generate an additional control file containing the quality control plots together with a description of their aims and an identification of possible outliers. Inspection of this document did not reveal any outliers to be remvoed. This was only run on the first time.
+
+```{r}
+arrayQualityMetrics(
+  expressionset = eset,
+  reporttitle = "data/public data/GSE150696 DLB PFC microarray/arrayQualityMetrics report",
+  force = TRUE,
+  do.logtransform = TRUE,
+  intgroup = "disease"
+  )
+```
+
+# Relative Log Expression data quality analysis
+
+Before calibrating and evaluating the data, we want to perform another quality control procedure, namely Relative Log Expression (RLE), To this end, we first perform an RMA without prior normalization. Then ,the RLE is performed by calculating the median log2 intensity of every transcript across all arrays. 
+
+This plot shows the deviation of expression intensity from the median expression for each microarray. If any of the boxplots from each sample have a larger extension, this indicates a high deviation from the median in a lot of transcripts, suggesting that these arrays are different from most of the others in some way. Boxes that are shifted in y-direction indicate a systematically higher or lower expression of the majority of transcripts in comparison to most of the other arrays. This could be caused by quality issues or batch effects. Therefore, if shape and median of a given box varies too much from the bulk, they should be inspected and potentially removed. Most of the boxplots appear similar. 
+
+```{r}
+rowmedians <- eset %>% 
+  exprs() %>% 
+  as.matrix() %>% 
+  rowMedians()
+
+sweep(exprs(eset), 1, rowmedians) %>% 
+  as.data.frame() %>% 
+  gather(
+    key = "sample",
+    value = "log2_expression_deviation") %>% 
+  ggplot(
+    aes(x = sample, y = log2_expression_deviation)
+  ) +
+  geom_boxplot(aes(fill = sample), outlier.shape = NULL)  +
+  theme_bw() +
+  ggtitle("Boxplot for RLE values") +
+  easy_rotate_x_labels(angle = -90) +
+  theme(
+    legend.position = "none"
+  )
+```
+
+
+# Checking control probes
+
+For each array, take the signal of all normgene->exon probesets against all normgene->intron probesets and compute the AUC of separating them. Good RNA and labeling push exon signal far above intron signal and the AUC approaches 1. Degraded or poorly labeled samples collapse the two and the AUC drops. This is the single number Affymetrix Expression Console flags on. Healthy arrays typically land around 0.90 and above; anything drifting toward 0.80 or below warrants inspection before you trust that sample.
+
+All looks fine here
+
+```{r}
+ps  <- rma(raw, target = "probeset")   # probeset-level, log2
+mat <- exprs(ps) 
+
+ctrl.probes <- probe.anno %>%
+  dplyr::select(ID, descriptions) %>% 
+  mutate(category = case_when(
+    str_detect(descriptions, "normgene->exon")   ~ "pos_housekeeping",
+    str_detect(descriptions, "normgene->intron") ~ "neg_housekeeping",
+    str_detect(descriptions, "antigenomic")      ~ "antigenomic_bg",
+    str_detect(descriptions, "polya_spike")      ~ "labeling_polyA",
+    str_detect(descriptions, "bac_spike")        ~ "hyb_bacspike",
+    str_detect(descriptions, "ercc")             ~ "ercc",
+    TRUE ~ NA_character_
+  )) %>% 
+  dplyr::filter(!is.na(category))
+
+library(pROC)
+pos <- ctrl.probes$ID[ctrl.probes$category == "pos_housekeeping"]
+neg <- ctrl.probes$ID[ctrl.probes$category == "neg_housekeeping"]
+
+pos_vs_neg_auc <- apply(mat, 2, function(a) {
+  as.numeric(pROC::auc(
+    response  = c(rep(1, length(pos)), rep(0, length(neg))),
+    predictor = c(a[pos], a[neg]),
+    quiet = TRUE))
+})
+
+pos_vs_neg_auc %>% 
+  as.data.frame() %>% 
+  rownames_to_column("sample") %>% 
+  set_colnames(c("sample", "auc")) %>% 
+  mutate(
+    geo_accession = str_remove(sample, pattern = "_.+$"), 
+  ) %>% 
+  left_join(meta) %>% 
+  ggplot(
+    aes(y= title, x = auc, fill = disease)
+  ) +
+  geom_col()
+```
+
+## anti-genomic floor
+
+median log2 ~ 4.5. no clear outliers.
+
+```{r}
+# ---- long-format control intensities: probeset x array -> tidy ----
+ctrl_long <- mat[rownames(mat) %in% ctrl.probes$ID, , drop = FALSE] %>%
+  as.data.frame() %>%
+  rownames_to_column("ID") %>%
+  pivot_longer(-ID, names_to = "array", values_to = "signal") %>%
+  left_join(ctrl.probes %>% 
+              dplyr::select(ID, category), by = "ID")
+
+# order arrays consistently across all panels (by median antigenomic floor)
+array_order <- ctrl_long %>%
+  filter(category == "antigenomic_bg") %>%
+  group_by(array) %>% summarise(m = median(signal)) %>%
+  arrange(m) %>% pull(array)
+
+ctrl_long <- ctrl_long %>% mutate(array = factor(array, levels = array_order))
+
+ctrl_long %>%
+  filter(category == "antigenomic_bg") %>%
+  ggplot(aes(array, signal)) +
+  geom_boxplot(outlier.size = 0.4, fill = "grey85") +
+  labs(title = "Antigenomic background (non-specific floor)",
+       x = NULL, y = "log2 signal") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6))
+```
+
+## ERC spike ins
+
+```{r}
+spike_levels <- list(
+  labeling_polyA = c("lys", "phe", "thr", "dap"),
+  hyb_bacspike   = c("bioB", "bioC", "bioD", "cre")
+)
+
+parse_spike <- function(id, cat) {
+  pat <- paste(spike_levels[[cat]], collapse = "|")
+  str_extract(id, regex(pat, ignore_case = TRUE)) %>% str_to_lower() %>%
+    (\(x) ifelse(x == "biob", "bioB",
+          ifelse(x == "bioc", "bioC",
+          ifelse(x == "biod", "bioD", x))))()
+}
+
+ladder_plot <- function(cat) {
+  d <- ctrl_long %>%
+    filter(category == cat) %>%
+    mutate(spike = parse_spike(ID, cat)) %>%
+    dplyr::filter(!is.na(spike)) %>%
+    group_by(array, spike) %>% 
+    summarise(signal = mean(signal), .groups = "drop") %>%
+    mutate(spike = factor(spike, levels = spike_levels[[cat]]))
+
+  ggplot(d, aes(spike, signal, group = array, colour = array)) +
+    geom_line(alpha = 0.5) + geom_point(size = 1) +
+    guides(colour = "none") +
+    labs(title = paste0(cat, " (expected increasing ladder)"),
+         x = "spike (increasing nominal concentration)", y = "log2 signal") +
+    theme_bw()
+}
+
+p_polya <- ladder_plot("labeling_polyA")
+p_bac   <- ladder_plot("hyb_bacspike")
+
+p_ercc <- ctrl_long %>%
+  filter(category == "ercc") %>%
+  ggplot(aes(array, signal)) +
+  geom_boxplot(outlier.size = 0.4, fill = "grey85") +
+  labs(title = "ERCC controls (per-array distribution)",
+       x = NULL, y = "log2 signal") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5, size = 6))
+
+p_ercc / (p_polya + p_bac)
+```
+
+
+All looks fine
+
+# Filtering
+
+Now, I will filter out lowly expressed genes. Microarray data commonly show a large number of probes in the background intensity range. These probes also do not change much across arrays. Hence they combine a low variance with a low intensity. Thus, they could end up being detected as differentially expressed although they are barely above the “detection” limit and are not very informative in general.
+
+We will perform a “soft” intensity based filtering here, since this is recommended by the `limma`  user guide. 
+
+
+```{r}
+bg <- mat[ctrl.probes$ID[ctrl.probes$category == "antigenomic_bg"], , drop = FALSE]
+bg_thresh <- apply(bg, 2, quantile, probs = 0.75)   # named by array
+
+names(bg_thresh) %<>% 
+  str_extract("GSM.{7}")
+
+# align array order between eset and the threshold vector
+bg_thresh <- bg_thresh[colnames(exprs(eset))]
+
+# smallest group size drives the "in at least n arrays" rule
+n_min = meta %>% 
+  group_by(group) %>% 
+  summarise(n = n()) %>% 
+  .$n %>% 
+  min
+
+above <- sweep(exprs(eset), 2, bg_thresh, FUN = ">")   # cluster x array logical
+keep  <- rowSums(above) >= n_min
+
+eset_filt <- eset[keep, ]
+```
+
+The hist above looks good. no peak at low intensity. i think finally ready for clustering
+
+# Clustering analysis
+
+## PCA on RMA normalised data
+
+No clear sep by disease or sex 
+
+```{r}
+exprs(eset_filt) %>% 
+  t() %>% 
+  prcomp() %>% 
+  autoplot(data = tibble(geo_accession = rownames(.$x)) %>%
+             left_join(meta), 
+           colour = "disease", 
+           shape = "sex",
+             size = 4) +
+    theme_bw() +
+    theme(aspect.ratio = 1) 
+```
+
+# Probe annotations and summarising
+Before we continue with the linear models for microarrays and differential expression, we first add “feature data”, i.e. annotation information to the transcript cluster identifiers stored in the featureData of our ExpressionSet.
+
+```{r}
+# mean intensity per probe, paired with its gene symbol
+probe_means <- tibble(
+  ID     = featureNames(eset_filt),
+  symbol = fData(eset_filt)$symbol,
+  mean_int = rowMeans(exprs(eset_filt))
+) %>%
+  filter(!is.na(symbol))            # drop controls / unannotated
+
+# one winning probe per gene
+keep_ids <- probe_means %>%
+  group_by(symbol) %>%
+  slice_max(mean_int, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  pull(ID)
+
+eset_filt <- eset_filt[keep_ids, ]
+```
+
+
+## Clustering analysis
+
+Next, I want to see how well samples cluster based on their genotype using clustering. First, I will calculate sample:sample distances using the `dist` function. Rather than the Euclidean distance, i will use the Manhattan distance, which uses absolute distances along rectangular paths instead of squared distances of the direct path, as it is more robust. Samples do not overly cluster based on their Manhatten distance.
+
+```{r}
+dists <- exprs(eset_filt) %>% 
+  t() %>% 
+  dist(method = "manhattan") %>% 
+  as.matrix()
+
+hmcol <- viridis_pal(option = "magma")(255)
+
+diag(dists) <- NA
+
+pheatmap::pheatmap(dists, 
+         col = (hmcol), 
+         annotation_row = pData(eset_filt) %>% 
+           dplyr::select(disease, sex, pmi),
+         legend = TRUE, 
+         treeheight_row = 0,
+         cellwidth = 10, 
+         cellheight = 10,
+         legend_breaks = c(min(dists, na.rm = TRUE), 
+                         max(dists, na.rm = TRUE)), 
+         legend_labels = (c("small distance", "large distance")),
+         main = "Clustering heatmap for the calibrated samples based on their Euclidean distance"
+         )
+```
+
+## just Control and DLB
+```{r}
+keep.samples = meta %>% 
+  dplyr::filter(
+    disease %in% c("CTRL", "DLB")
+  ) %>% 
+  .$geo_accession
+```
+
+```{r}
+exprs(eset_filt)[,keep.samples] %>% 
+  t() %>% 
+  prcomp() %>% 
+  autoplot(data = tibble(geo_accession = rownames(.$x)) %>%
+             left_join(meta), 
+           colour = "disease", 
+           shape = "sex",
+             size = 4) +
+    theme_bw() +
+    theme(aspect.ratio = 1) 
+```
+
+# Limma differential expression
+
+## drop that no pmi sample
+```{r}
+keep.samples = pData(eset_filt) %>% 
+  as_tibble %>% 
+  dplyr::filter(geo_accession != "GSM4556883") %>% 
+  .$geo_accession
+
+eset_filt = eset_filt[,keep.samples]
+```
+
+
+```{r}
+design <- model.matrix(~ 0 + group + age + pmi, data = pData(eset_filt))
+
+colnames(design) %<>% 
+  str_remove("group")
+
+contrasts <- makeContrasts(
+  # sex-specific: each disease sex vs same-sex control
+  DLB_M = DLB_M - CTRL_M,
+  DLB_F = DLB_F - CTRL_F,
+  PDD_M = PDD_M - CTRL_M,
+  PDD_F = PDD_F - CTRL_F,
+  AD_M  = AD_M  - CTRL_M,
+  AD_F  = AD_F  - CTRL_F,
+
+  # overall, sex-balanced (equal weight per sex = sex-adjusted effect)
+  DLB_avg = (DLB_M + DLB_F)/2 - (CTRL_M + CTRL_F)/2,
+  PDD_avg = (PDD_M + PDD_F)/2 - (CTRL_M + CTRL_F)/2,
+  AD_avg  = (AD_M  + AD_F )/2 - (CTRL_M + CTRL_F)/2,
+
+  levels = design
+)
+
+colnames(eset_filt) == rownames(design)
+
+fit = lmFit(eset_filt, design) %>% 
+  contrasts.fit(contrasts) %>% 
+  eBayes()
+
+topTable(fit, coef = "DLB_avg", number = Inf) %>% 
+  as_tibble(rownames = "ID") %>% 
+  left_join(probe.anno %>% 
+              dplyr::select(ID, gene_symbols, descriptions, chromosome)) %>% 
+  ggplot(
+    aes(x = logFC, y = -log10(P.Value))
+  ) +
+  geom_point(
+    aes(colour = adj.P.Val < 0.05)
+  ) +
+  scale_color_manual(values = c("grey50", "red")) 
+```
+
+# check lysoDLB genes
+
+```{r}
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/overlapping_nodes_metadata.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+
+topTable(fit, coef = "DLB_avg", number = Inf) %>% 
+  as_tibble(rownames = "ID") %>% 
+  mutate(
+    DE = adj.P.Val < 0.05
+  ) %>% 
+  left_join(node_metadata$CD_1A_lyso_DLB %>% 
+              dplyr::select(symbol = X, everything())
+  ) %>% 
+  ggplot(
+    aes(
+      x = z_both, y = -log10(P.Value), colour = logFC, alpha =  adj.P.Val < 0.05
+    )
+  ) +
+  geom_point() + 
+  scale_colour_continuous(palette = "RdBu")
+
+
+```
+
+# check some cell marker genes
+
+Maybe some neurodegen happening here. have a look at some marker genes. 
+```{r}
+exprs(eset_filt) %>% 
+  as_tibble(rownames = "probeset_id") %>% 
+  left_join(
+    fData(eset_filt) %>% 
+      as_tibble(rownames = "probeset_id")
+  ) %>% 
+  dplyr::select(symbol, starts_with("GSM")) %>% 
+  dplyr::filter(symbol %in% c("ENO2", "GFAP", "OLIG2", "GAD1", "CD34", "P2RY12", "MAP2")) %>% 
+  pivot_longer(
+    names_to = "geo_accession", 
+    values_to = "intensity", 
+    starts_with("GSM")
+  ) %>% 
+  left_join(pData(eset_filt) %>% 
+              as_tibble()
+            ) %>% 
+  ggplot(
+    aes(
+      x = disease, y = intensity, fill = disease
+    )
+  ) +
+  geom_boxplot(
+    outliers = F
+  ) + 
+  geom_jitter() +
+  facet_wrap(~symbol, scales = "free")
+```
+
+Looks like there is some neurodegen here. so will account for this using the expression of ENO2. 
+
+```{r}
+eno2.vales = exprs(eset_filt) %>% 
+  as_tibble(rownames = "probeset_id") %>% 
+  left_join(
+    fData(eset_filt) %>% 
+      as_tibble(rownames = "probeset_id")
+  ) %>% 
+  dplyr::select(symbol, starts_with("GSM")) %>% 
+  dplyr::filter(symbol == "ENO2") %>% 
+   pivot_longer(
+    names_to = "geo_accession", 
+    values_to = "intensity", 
+    starts_with("GSM")
+  ) %>% 
+  dplyr::select(geo_accession, ENO2 = intensity)
+
+# add to eset
+
+pData(eset_filt) %<>% 
+  left_join(eno2.vales)
+```
+
+## rpt DE analysis accounting for neurodegen
+
+this results in no DE genes. so leave it out. 
+```{r}
+# design matrix matched by original authors
+design.2 <- model.matrix(~ 0 + group + age + pmi + ENO2, data = pData(eset_filt))
+
+colnames(design.2) %<>% 
+  str_remove("group")
+
+contrasts.2 <- makeContrasts(
+  # sex-specific: each disease sex vs same-sex control
+  DLB_M = DLB_M - CTRL_M,
+  DLB_F = DLB_F - CTRL_F,
+  PDD_M = PDD_M - CTRL_M,
+  PDD_F = PDD_F - CTRL_F,
+  AD_M  = AD_M  - CTRL_M,
+  AD_F  = AD_F  - CTRL_F,
+
+  # overall, sex-balanced (equal weight per sex = sex-adjusted effect)
+  DLB_avg = (DLB_M + DLB_F)/2 - (CTRL_M + CTRL_F)/2,
+  PDD_avg = (PDD_M + PDD_F)/2 - (CTRL_M + CTRL_F)/2,
+  AD_avg  = (AD_M  + AD_F )/2 - (CTRL_M + CTRL_F)/2,
+
+  levels = design.2
+)
+
+colnames(eset_filt) == rownames(design.2)
+
+fit.2 = lmFit(eset_filt, design.2) %>% 
+  contrasts.fit(contrasts.2) %>% 
+  eBayes()
+
+topTable(fit.2, coef = "DLB_avg", number = Inf) %>% 
+  as_tibble(rownames = "ID") %>% 
+  left_join(probe.anno %>% 
+              dplyr::select(ID, gene_symbols, descriptions, chromosome)) %>% 
+  ggplot(
+    aes(x = logFC, y = -log10(P.Value))
+  ) +
+  geom_point(
+    aes(colour = adj.P.Val < 0.05)
+  ) +
+  scale_color_manual(values = c("grey50", "red")) 
+```
+
+# community testing
+
+```{r}
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster.DLB <- 
+  cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+
+
+network.genes.cluster.DLB %<>% 
+  lapply(function(x) {
+    x %>% 
+      intersect(fData(eset_filt)$symbol)
+  })
+
+network.genes.cluster.PD <- 
+  cluster.gprofiler.results$CD_1A_lyso_PD %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe()
+
+network.genes.cluster.PD %<>% 
+  lapply(function(x) {
+    x %>% 
+      intersect(fData(eset_filt)$symbol)
+  })
+
+fry.DLB = colnames(contrasts) %>% 
+  sapply(function(x) 
+  {
+    exprs(eset_filt) %>% 
+      as_tibble(rownames = "probeset_id") %>% 
+      left_join(
+        fData(eset_filt) %>% 
+          as_tibble(rownames = "probeset_id")
+  ) %>% 
+      column_to_rownames("symbol") %>% 
+      dplyr::select(starts_with("GSM")) %>% 
+      fry(
+        index = network.genes.cluster.DLB, 
+        design = design, 
+        contrast = contrasts[,x], 
+        sort = "mixed"
+      ) %>% 
+      as_tibble(rownames = "community")
+    
+  }, simplify = F)
+
+fry.PD = colnames(contrasts) %>% 
+  sapply(function(x) 
+  {
+    exprs(eset_filt) %>% 
+      as_tibble(rownames = "probeset_id") %>% 
+      left_join(
+        fData(eset_filt) %>% 
+          as_tibble(rownames = "probeset_id")
+  ) %>% 
+      column_to_rownames("symbol") %>% 
+      dplyr::select(starts_with("GSM")) %>% 
+      fry(
+        index = network.genes.cluster.PD, 
+        design = design, 
+        contrast = contrasts[,x], 
+        sort = "mixed"
+      ) %>% 
+      as_tibble(rownames = "community")
+    
+  }, simplify = F)
+```
+
+
+# export
+
+```{r}
+topTable(fit, coef = "DLB_avg", number = Inf) %>% 
+  as_tibble(rownames = "ID") %>% 
+  mutate(
+    DE = adj.P.Val < 0.05
+  ) %>% 
+  dplyr::select(symbol, logFC, pval = P.Value, FDR = adj.P.Val, DE) %>% 
+  write.csv("data/public data/processed/GSE150696_toptable_DLBvCont_hs_bulk_PFC.csv")
+
+topTable(fit, coef = "PDD_avg", number = Inf) %>% 
+  as_tibble(rownames = "ID") %>% 
+  mutate(
+    DE = adj.P.Val < 0.05
+  ) %>% 
+  dplyr::select(symbol, logFC, pval = P.Value, FDR = adj.P.Val, DE) %>% 
+  write.csv("data/public data/processed/GSE150696_toptable_PDDvCont_hs_bulk_PFC.csv")
+
+fry.PD %>% 
+  saveRDS("data/public data/processed/GSE150696_fry_PDDvCont_hs_bulk_PFC.rds")
+
+fry.DLB %>% 
+  saveRDS("data/public data/processed/GSE150696_fry_DLBvCont_hs_bulk_PFC.rds")
+```
+
+# sessionInfo
+```{r}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
