@@ -29,25 +29,36 @@ all.toptable.filepaths = list.files(
   full.names = T) 
 
 toptables = list(
-  DLB.hs.ACC = read_csv("data/public data/processed/syn5239400_toptable_DLBvCont_hs_bulk_ACC.csv", 
-                        col_select = -1) %>% 
+  DLB.ACC = read_csv("data/public data/processed/syn5239400_toptable_DLBvCont_hs_bulk_ACC.csv", 
+                     col_select = -1) %>% 
     mutate(
       FDR = p.adjust(pval, "fdr"), 
       .after = "pval"
     ), 
   
   DLB.PFC = read_csv("data/public data/processed/GSE150696_toptable_DLBvCont_hs_bulk_PFC.csv",   
-                        col_select = -1), 
+                     col_select = -1), 
   
   MPSIIIA.wholeBrain = read_xlsx("data/public data/processed/GSE244310_toptable_lysoMPSIIIAC_dr_bulk_brain.xlsx", sheet = "MPS IIIA"), 
   
-  MPSIIIC.wholeBrain = read_xlsx("data/public data/processed/GSE244310_toptable_lysoMPSIIIAC_dr_bulk_brain.xlsx", sheet = "MPS IIIC"), 
-  
   MPSIIIB.wholeBrain = read_xlsx("data/public data/processed/GSE242370_toptable_lysoMPSIIIB_dr_bulk_brain.xlsx"), 
   
+  MPSIIIC.wholeBrain = read_xlsx("data/public data/processed/GSE244310_toptable_lysoMPSIIIAC_dr_bulk_brain.xlsx", sheet = "MPS IIIC"), 
+  
   MPSIIIB.larvae = read_xlsx("data/public data/processed/GSE217196_toptable_lysoMPSIIIB_dr_bulkLarvae.xlsx")
+  
+) %>% 
+  # add in DLB ACC snRNAseq
+  c(readRDS("data/public data/processed/GSE178146_toptable_DLB_hs_ACC_snRNAseq.rds") %>% 
+  .[names(.) %>% str_detect("DLB")] %>% 
+    set_names(
+      names(.) %>% 
+        str_replace(
+          pattern = "DLB_", replacement = "DLB.ACC_"
+        )
+    )
+  )
 
-  ) 
 ```
 
 ## convert zf to human
@@ -161,6 +172,41 @@ d <- dist(fc)                        # pairwise-complete; some entries may be NA
 d[is.na(d)] <- max(d, na.rm = TRUE)  # genes sharing no datasets = maximally distant
 row_hc <- hclust(d, method = "average")
 
+# column annotation
+
+col_meta <- tribble(
+  ~dataset,               ~species,     ~brain_region, ~age,  ~disease_type, ~type,
+  "DLB.ACC",            "Human",      "ACC",         "post mortem", "DLB",  "bulk",
+  "DLB.PFC",            "Human",      "PFC",         "post mortem", "DLB",  "bulk",
+  "MPSIIIA.wholeBrain", "Zebrafish", "whole brain",   "3 mo",  "lyso",  "bulk",
+  "MPSIIIB.wholeBrain", "Zebrafish", "whole brain",   "6 mo",  "lyso",  "bulk",
+  "MPSIIIC.wholeBrain", "Zebrafish", "whole brain",   "3 mo",    "lyso",  "bulk",
+  "MPSIIIB.larvae",    "Zebrafish",  "whole larvae",   "7 days",    "lyso",  "bulk",
+  "DLB.ACC_Astrocyte", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
+  "DLB.ACC_Microglia", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
+  "DLB.ACC_Neuron_Ex", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
+  "DLB.ACC_Neuron_In", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
+  "DLB.ACC_Oligodendrocyte", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
+  "DLB.ACC_OPC", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq"       
+  
+)
+col_meta <- col_meta %>%
+  slice(match(colnames(fc), dataset)) %>%   # force same order as matrix columns
+  column_to_rownames("dataset")
+
+
+ann_cols <- list(
+  species      = c(Human = "#4C72B0", Mouse = "#DD8452", Zebrafish = "#55A868"),
+  # brain_region = c(ACC = "#8172B3", Forebrain = "#C44E52", `Whole brain` = "#937860"),
+  disease      = c(DLB = "#DA8BC3", lyso = "#CCB974")
+  # age left to a continuous scale below, or add discrete levels here
+)
+col_ha <- HeatmapAnnotation(
+  df  = col_meta,
+  col = ann_cols,
+  annotation_name_gp = gpar(fontsize = 8)
+)
+
 Heatmap(
   fc,                                # original matrix, NAs intact
   name = "logFC",
@@ -173,6 +219,8 @@ Heatmap(
   },
   column_names_gp = gpar(fontsize = 8),
   row_names_gp = gpar(fontsize = 10),
+  
+   top_annotation = col_ha
 )
 ```
 
