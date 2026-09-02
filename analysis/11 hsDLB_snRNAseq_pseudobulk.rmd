@@ -58,14 +58,16 @@ theme_set(theme_light() +
 # Introduction
 Here, I will perform the pseudobulk comparisons within cell type between DLB and contorl brains. 
 
-The preprocessing of the data was performed previously and the seurat object was loaded. It was then converted to a PB object for use in edgeR.
+The preprocessing of the data was performed previously (in the /code folder) and the seurat object was loaded. It was then converted to a PB object for use in edgeR.
 
 Note that I have tried having each celltype have its own subtypes (e.g. microglia 1, microglia 2), but this results in not enough reads per celltype to do pseudo-bulk analyses. Therefore, I will combine each celltype. 
+
+/Users/karissabarthelson/analyses/2025_adultchilddementiagenetics/data/public data/GSE178146_RAW - DLB and PD snRNAseq
 
 ```{r}
 # read in smaple metadata
 meta <- 
-  data.table::fread("data/public data/GSE178146_RAW/GSE178146_series_matrix.txt", 
+  data.table::fread("data/public data/GSE178146_RAW - DLB and PD snRNAseq/GSE178146_series_matrix.txt", 
                           skip = 27, sep = "\t", fill = T) %>% 
   mutate(
     `!Sample_title` = str_remove(`!Sample_title`, pattern = "\\!")
@@ -84,7 +86,7 @@ meta <-
   as_tibble()
 
 # seurat object
-data.seurat <- qread("data/public data/GSE178146_RAW/R_objects/PD_DLB_data_seurat.qs")
+data.seurat <- qread("data/public data/GSE178146_RAW - DLB and PD snRNAseq/R_objects/PD_DLB_data_seurat.qs")
 
 # need to merge layers of the seurat object before converting to PB object
 # Seurat::DimPlot(data.seurat, 
@@ -100,7 +102,7 @@ data.seurat[["RNA"]] <- JoinLayers(data.seurat[["RNA"]])
 
 y <- Seurat2PB(data.seurat, sample="orig.ident", cluster="celltype")
 
- # tidyup samples
+# tidyup samples
 y$samples %<>% 
   as_tibble(rownames = "sample_cluster") %>% 
   left_join(meta %>% dplyr::select(sample, disease)) %>% 
@@ -319,7 +321,7 @@ y$samples %>%
   facet_wrap(~cluster, scales = "free_x") +
   scale_y_continuous(labels = comma) +
   labs(
-    title = "Total number of nuclei per celltype and sample"
+    title = "Total number of reads per celltype and sample"
     
   )
 
@@ -630,8 +632,6 @@ n.net.genes.detect.DLB = toptables$`DLB_Microglia - Control_Microglia`$gene %in%
 n.net.genes.detect.PD = toptables$`PD_Microglia - Control_Microglia`$gene %in% node_metadata$CD_1A_lyso_PD$X %>% summary %>% .[3] 
 
 
-
-
 toptables[grepl(names(toptables), pattern = "DLB")] %>% 
   bind_rows() %>% 
   dplyr::filter(
@@ -645,7 +645,7 @@ toptables[grepl(names(toptables), pattern = "DLB")] %>%
   ) +
   geom_bar() +
   labs(
-    title = "Number Lyso_DLB subnetwork genes which are DE in DLB brain cells"
+    title = "Number Lyso_DLB subnetwork genes \nDE in DLB brain cells"
   ) +
 
 toptables[grepl(names(toptables), pattern = "PD")] %>% 
@@ -661,7 +661,7 @@ toptables[grepl(names(toptables), pattern = "PD")] %>%
   geom_bar(
   ) +
   labs(
-    title = "Number Lyso_PD subnetwork genes which are DE in PD brain cells"
+    title = "Number Lyso_PD subnetwork genes \nDE in PD brain cells"
   )
 ```
 
@@ -1379,12 +1379,29 @@ toptables[names(toptables) %>%
 y %>% 
   qsave("data/public data/GSE178146_RAW/R_objects/pseudobulk_dgeObject.qs")
 
-
 fry.results %>% 
   qsave("data/public data/GSE178146_RAW/R_objects/fry_results.qs")
 
 toptables %>% 
   qsave("data/public data/GSE178146_RAW/R_objects/toptables.qs")
+
+toptables %>% 
+  lapply(function(x) {
+    x %>% 
+      dplyr::select(
+    symbol = gene, logFC, pval = PValue, FDR, DE
+  )
+  }) %>% 
+  set_names(
+    names(.) %>% str_remove(" - .+")
+  ) %>% 
+  saveRDS("data/public data/processed/GSE178146_toptable_DLB_hs_ACC_snRNAseq.rds")
+# also saved this as xlsx. but easier to reimport later if RDS format
+# writexl::write_xls("data/public data/processed/GSE178146_toptable_DLB_hs_ACC_snRNAseq.xlsx")
+
+# export fry object
+fry.results$DLB %>% 
+   saveRDS("data/public data/processed/GSE178146_fry_DLB_hs_ACC_snRNAseq.rds")
 ```
 
 

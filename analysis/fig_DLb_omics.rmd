@@ -57,13 +57,22 @@ toptables = list(
           pattern = "DLB_", replacement = "DLB.ACC_"
         )
     )
+  ) %>% 
+  # add in MPS IIIA snRNAseq cortex
+  c(
+    readRDS("data/public data/processed/GSE278451_toptable_lysoMPSIIIA_mm_forebrain_snRNAseq.rds")
+    ) %>% 
+  set_names(
+   names(.) %>% 
+     str_replace("^(.+)_(SgshKO)$", "\\2_\\1")
   )
 
+# omit some toptables
+toptables <- toptables[setdiff(names(toptables), "SgshKO_Astro")] # only N = 1 in the KO
 ```
 
 ## convert zf to human
 ```{r}
-
 
 convertzf2Hs = function(toptable) {
   
@@ -93,6 +102,39 @@ toptables$MPSIIIC.wholeBrain <- convertzf2Hs(toptables$MPSIIIC.wholeBrain)
 toptables$MPSIIIB.larvae <- convertzf2Hs(toptables$MPSIIIB.larvae)  
  
 ```
+
+## convert mouse to human
+```{r}
+convertMm2Hs = function(toptable) {
+  
+  mm2hs = homologene::homologene(
+  inTax = "10090", # mouse
+  outTax = "9606", # human
+  toptable$symbol
+  ) %>% 
+  as_tibble() %>% 
+  dplyr::select(
+    symbol = `10090`, hs_gene_name = `9606`
+  )
+  
+  toptable %>% 
+    left_join(mm2hs) %>%
+    dplyr::select(-symbol) %>%
+    na.omit() %>%
+    dplyr::select(symbol = hs_gene_name, everything()) %>%
+    group_by(symbol) %>%
+    slice_max(order_by = tibble(DE, abs(logFC)), n = 1, with_ties = FALSE) %>%
+    ungroup()
+}
+
+toptables$SgshKO_OPC <- convertMm2Hs(toptables$SgshKO_OPC)
+toptables$SgshKO_Oligo <- convertMm2Hs(toptables$SgshKO_Oligo)
+toptables$SgshKO_NeuronMix <- convertMm2Hs(toptables$SgshKO_NeuronMix)
+toptables$SgshKO_NeuronIn <- convertMm2Hs(toptables$SgshKO_NeuronIn)
+toptables$SgshKO_NeuronEx <- convertMm2Hs(toptables$SgshKO_NeuronEx)
+toptables$SgshKO_Immune <- convertMm2Hs(toptables$SgshKO_Immune)
+```
+
 
 
 # import lysoDLB genes
@@ -158,8 +200,7 @@ de <- dat %>%
 de <- de[rownames(fc), colnames(fc)]  
 
 lim <- max(abs(fc), na.rm = TRUE)
-col_fun <- colorRamp2(c(-1, 0, 1), c("#053061", "white", "#67001F"))
-
+col_fun <- colorRamp2(c(-1, 0, 1), c("#2166AC", "white", "#B2182B"))
 
 # only retain genes DE in at least one dataset
 keep <- rownames(de)[rowSums(de, na.rm = TRUE) >= 2]
@@ -182,23 +223,32 @@ col_meta <- tribble(
   "MPSIIIB.wholeBrain", "Zebrafish", "whole brain",   "6 mo",  "lyso",  "bulk",
   "MPSIIIC.wholeBrain", "Zebrafish", "whole brain",   "3 mo",    "lyso",  "bulk",
   "MPSIIIB.larvae",    "Zebrafish",  "whole larvae",   "7 days",    "lyso",  "bulk",
+
   "DLB.ACC_Astrocyte", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
   "DLB.ACC_Microglia", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
   "DLB.ACC_Neuron_Ex", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
   "DLB.ACC_Neuron_In", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
   "DLB.ACC_Oligodendrocyte", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq",
-  "DLB.ACC_OPC", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq"       
+  "DLB.ACC_OPC", "Human",      "ACC",         "post mortem", "DLB",  "snRNA-seq", 
+  
+  "SgshKO_Immune", "Mouse", "forebrain", "6 mo", "lyso",  "snRNA-seq", 
+  "SgshKO_NeuronEx", "Mouse", "forebrain", "6 mo", "lyso",  "snRNA-seq", 
+  "SgshKO_NeuronIn", "Mouse", "forebrain", "6 mo", "lyso",  "snRNA-seq", 
+  "SgshKO_NeuronMix", "Mouse", "forebrain", "6 mo", "lyso",  "snRNA-seq",  
+  "SgshKO_Oligo", "Mouse", "forebrain", "6 mo", "lyso",  "snRNA-seq", 
+  "SgshKO_OPC", "Mouse", "forebrain", "6 mo", "lyso",  "snRNA-seq", 
   
 )
 col_meta <- col_meta %>%
-  slice(match(colnames(fc), dataset)) %>%   # force same order as matrix columns
+  dplyr::slice(match(colnames(fc), dataset)) %>%   # force same order as matrix columns
   column_to_rownames("dataset")
 
 
 ann_cols <- list(
   species      = c(Human = "#4C72B0", Mouse = "#DD8452", Zebrafish = "#55A868"),
   # brain_region = c(ACC = "#8172B3", Forebrain = "#C44E52", `Whole brain` = "#937860"),
-  disease      = c(DLB = "#DA8BC3", lyso = "#CCB974")
+  disease_type      = c(DLB = "#DA8BC3", lyso = "#CCB974"), 
+  type      = c(bulk = "grey70", `snRNA-seq` = "black")
   # age left to a continuous scale below, or add discrete levels here
 )
 col_ha <- HeatmapAnnotation(
@@ -211,7 +261,7 @@ Heatmap(
   fc,                                # original matrix, NAs intact
   name = "logFC",
   col = col_fun,
-  na_col = "grey30",                 # NAs render grey
+  na_col = "grey50",                 # NAs render grey
   cluster_rows = row_hc,             # precomputed, NA-safe tree
   cluster_columns = F,
   cell_fun = function(j, i, x, y, w, h, fill) {

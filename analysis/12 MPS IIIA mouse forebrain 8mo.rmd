@@ -1,0 +1,713 @@
+---
+title: "12 MPS IIIA mouse forebrain 8mo"
+author: "Karissa Barthelson"
+date: "2026-09-01"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Introduction
+
+Here, I will reanalyse the snRNA-seq dataset from MPS IIIA mouse model 
+Balak et al. 2026: https://www.cell.com/immunity/fulltext/S1074-7613(26)00307-9
+GEO accession: GSE278451
+
+```{r}
+library(tidyverse)
+library(forcats)
+library(magrittr)
+library(readxl)
+library(qs) # for fast save and reading of objects into memory (alternative to rds)
+library(parallel) 
+library(Matrix)
+
+library(Seurat)
+library(SoupX)
+library(scDblFinder)
+library(SingleCellExperiment)
+library(scuttle)   
+library(org.Mm.eg.db)
+
+library(bluster)
+library(edgeR)
+
+# vis
+library(pander)
+library(ggpubr)
+library(patchwork)
+library(scales)
+library(ggeasy)
+library(ggfortify)
+
+theme_set(theme_light() +
+            theme(plot.title = element_text(hjust = 0.5), 
+                  strip.text = element_text(face = "bold"),
+                  strip.background = element_rect(fill = "grey20")
+            )
+)
+
+set.seed(1234)
+```
+
+# Metadata
+
+The cortex snRNA samples only (6 month, three genotypes, two replicates each).
+
+```{r meta}
+raw.data.dir <- "data/public data/GSE278451 - MPS IIIA mouse cortex 6mo/GSE278451_RAW"
+
+samples <- tribble(
+  ~gsm,         ~genotype, ~rep,
+  "GSM8546859", "WT",      1,
+  "GSM8546860", "WT",      2,
+  "GSM8546861", "Het",     1,
+  "GSM8546862", "Het",     2,
+  "GSM8546863", "SgshKO",  1,
+  "GSM8546864", "SgshKO",  2
+) %>%
+  mutate(
+    sample_id = paste0(genotype, "_rep", rep),
+    genotype = factor(genotype, levels = c("WT", "Het", "SgshKO"))
+  )
+```
+
+# Removal of background contamination with soupX
+
+The original authors have provided the outputs of cellranger. They used cellbender to remove the bg contamination. Here, I will use soupX, primarily as I can run it locally (HPC being annoying)
+
+Each sample needs a rough clustering to seed autoEstCont, so I run a fast Seurat pass on the called cells inside the loop, then adjust the raw counts. If autoEstCont fails on a sample it falls back to a fixed 5% contamination.
+
+````{r soupx}
+soupCounts <- samples$gsm %>%
+  set_names(samples$sample_id) %>%
+  lapply(function(g) {
+
+    tod <- Read10X_h5(
+      list.files(raw.data.dir, pattern = paste0(g, ".*raw.*h5$"),
+                 full.names = TRUE)
+      )
+    toc <- Read10X_h5(
+      list.files(raw.data.dir, pattern = paste0(g, ".*filtered.*h5$"),
+                 full.names = TRUE)
+      )
+    
+    if (is.list(tod)) tod <- tod[["Gene Expression"]]
+    if (is.list(toc)) toc <- toc[["Gene Expression"]]
+
+    # quick clusters to seed autoEstCont
+    cl <- CreateSeuratObject(toc) %>%
+      NormalizeData() %>%
+      FindVariableFeatures() %>%
+      ScaleData() %>%
+      RunPCA(npcs = 30) %>%
+      FindNeighbors(dims = 1:30) %>%
+      FindClusters(resolution = 0.5) %>%
+      Idents() %>%
+      as.character() %>%
+      set_names(colnames(toc))
+
+    sc <- SoupChannel(tod, toc) %>%
+      setClusters(cl)
+
+    sc <- tryCatch(
+      autoEstCont(sc, doPlot = T),
+      error = function(e) setContaminationFraction(sc, 0.05)
+    )
+
+    adjustCounts(sc, roundToInt = TRUE)
+  })
+```
+
+I build a Seurat object per sample from the corrected counts, prefix the barcodes with the sample so nothing collides on merge, and add the mouse mitochondrial, ribosomal and haemoglobin fractions. For nuclei the mitochondrial fraction should be low, so a high value flags cytoplasmic leakage.
+
+````{r buildObjects}
+seu <- soupCounts %>%
+  imap(function(cts, sid) {
+    colnames(cts) <- paste(sid, colnames(cts), sep = "_")
+    o <- CreateSeuratObject(cts, project = sid, min.cells = 3, min.features = 100)
+    o$sample_id <- sid
+    o$genotype  <- samples$genotype[match(sid, samples$sample_id)]
+    o[["percent.mt"]]   <- PercentageFeatureSet(o, pattern = "^mt-")
+    o[["percent.ribo"]] <- PercentageFeatureSet(o, pattern = "^Rp[sl]")
+    o[["percent.hb"]]   <- PercentageFeatureSet(o, pattern = "^Hb[ab]")
+    o
+  })
+```
+
+# QC
+
+I pull the per cell metadata into one tibble, then call outliers per sample with 3 MADs (lower tail on library size and genes, upper tail on mitochondrial fraction), combined with hard floors of 300 genes and a 5% mitochondrial ceiling.
+
+
+```{r qc}
+qc <- seu %>%
+  imap(function(o, sid) o[[]] %>% rownames_to_column("cell")) %>%
+  bind_rows() %>%
+  as_tibble() %>%
+  group_by(sample_id) %>%
+   mutate(
+     low_lib = isOutlier(nCount_RNA, nmads = 3, type = "lower", log = TRUE) %>% 
+       as.logical(),
+    low_genes = isOutlier(nFeature_RNA, nmads = 3, type = "lower", log = TRUE) %>% 
+      as.logical(),
+    high_mt = isOutlier(percent.mt,   nmads = 3, type = "higher") %>% 
+      as.logical(),
+    pass = !(low_lib | low_genes | high_mt) & nFeature_RNA >= 300 & percent.mt <= 5
+  ) %>%
+  ungroup()
+```
+
+
+QC distributions before filtering.
+
+
+```{r qcViolins}
+qc %>%
+  pivot_longer(c(nCount_RNA, nFeature_RNA, percent.mt, percent.hb),
+               names_to = "metric", values_to = "value") %>%
+  ggplot(aes(sample_id, value, fill = genotype)) +
+  geom_violin(scale = "width") +
+  facet_wrap(~metric, scales = "free_y", ncol = 1) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL)
+
+qc %>%
+  ggplot(aes(nCount_RNA, nFeature_RNA, colour = percent.mt)) +
+  geom_point(size = 0.3) +
+  scale_x_log10() +
+  scale_y_log10() +
+  scale_colour_viridis_c() +
+  facet_wrap(~sample_id)
+```
+
+Cells kept per sample.
+
+```{r qcSummary}
+qc %>%
+  group_by(sample_id, genotype) %>%
+  summarise(
+    n_cells         = n(),
+    n_cells_pass    = sum(pass),
+    pct_pass  = round(100 * mean(pass), 1),
+    med_genes = median(nFeature_RNA[pass]),
+    med_mt    = round(median(percent.mt[pass]), 2),
+    .groups = "drop"
+  ) %>% 
+  pander()
+```
+
+Apply the filter.
+
+```{r qcApply}
+keep <- qc %>% dplyr::filter(pass) %>% pull(cell)
+
+seu %<>% 
+  lapply(function(o) subset(o, cells = intersect(colnames(o), keep)))
+```
+
+# Doublets
+
+scDblFinder per sample before merging, so multiplets do not create false intermediate clusters. I check the rate then keep singlets.
+
+```{r doublets}
+seu %<>%
+  lapply(function(o) {
+    sce <- as.SingleCellExperiment(o) %>% 
+      scDblFinder()
+    
+    o$scDblFinder.class <- sce$scDblFinder.class
+    o$scDblFinder.score <- sce$scDblFinder.score
+    o
+  })
+
+# doublet fraction per sample
+seu %>%
+  sapply(function(o) mean(o$scDblFinder.class == "doublet")) %>%
+  round(3)
+
+seu %<>% 
+  lapply(function(o) subset(o, subset = scDblFinder.class == "singlet"))
+```
+
+
+# Merge and cluster, no integration
+
+I merge the samples, join the layers into one counts layer, and run a single standard pass with no batch correction. This is deliberate so I can see whether cells cluster by biology or by mouse before deciding on Harmony.
+
+```{r cluster}
+cortex <- merge(seu[[1]], seu[-1], project = "cortex") %>%
+  JoinLayers() %>%
+  NormalizeData() %>%
+  FindVariableFeatures(nfeatures = 2000) %>%
+  ScaleData() %>%
+  RunPCA(npcs = 30) %>%
+  RunUMAP(dims = 1:30) %>%
+  FindNeighbors(dims = 1:30) 
+
+remove(seu)
+remove(soupCounts)
+```
+
+# Cluster stability
+
+i want large clusters so they are comparable across datasets. so set the smallest resolution. 
+
+```{r}
+cortex %<>% FindClusters(resolution = seq(0.1, 1.0, by = 0.2))
+
+cortex@meta.data %>%
+  dplyr::select(starts_with("RNA_snn_res.")) %>%
+  pivot_longer(
+    everything(), 
+    names_to = "res", 
+    values_to = "cluster") %>%
+  mutate(res = as.numeric(str_remove(res, "RNA_snn_res."))) %>%
+  group_by(res) %>%
+  summarise(n_clusters = n_distinct(cluster)) %>%
+  ggplot(
+    aes(res, n_clusters)
+    ) +
+  geom_line() +
+  geom_point() +
+  scale_x_continuous(breaks =  seq(0.1, 1.0, by = 0.2))
+  labs(x = "resolution", y = "n clusters")
+
+DimPlot(cortex, group.by = "RNA_snn_res.0.1", label = TRUE, shuffle = T) +
+  theme(legend.position = "none") +
+DimPlot(cortex, group.by = "RNA_snn_res.0.3", label = TRUE, shuffle = T) +
+  theme(legend.position = "none") 
+  
+
+# FindClusters leaves Idents at the last resolution, so reset to the chosen one
+cortex$seurat_clusters <- cortex$RNA_snn_res.0.1
+Idents(cortex) <- "RNA_snn_res.0.1"
+```
+
+# Batch diagnostic
+
+If each cluster draws from all six samples in roughly the expected proportions, no integration is needed and I proceed on this embedding. If clusters split by sample or genotype, I add Harmony for clustering only.
+
+```{r batchDiag}
+(DimPlot(cortex, group.by = "seurat_clusters", label = TRUE, shuffle = T) +
+   ggtitle("cluster") +
+   theme(legend.position = "none")) |
+(DimPlot(cortex, group.by = "genotype", shuffle = T)  + ggtitle("genotype")) |
+(DimPlot(cortex, group.by = "sample_id", shuffle = T) + ggtitle("sample"))
+
+DimPlot(cortex, 
+        group.by = "seurat_clusters", 
+        split.by = "sample_id", 
+        ncol = 3, 
+        label = TRUE
+        )
+
+# fraction of each cluster coming from each sample
+cortex@meta.data %>%
+  as_tibble() %>%
+  dplyr::count(seurat_clusters, genotype) %>%
+  group_by(seurat_clusters) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  ggplot(aes(seurat_clusters, prop, fill = genotype)) +
+  geom_col() +
+  scale_fill_manual(
+    values = c(
+      "pink", 
+      "red",
+      "grey" 
+    )
+  ) +
+  labs(x = "cluster", y = "fraction of cluster")
+```
+
+# Cluster annotation
+
+A dotplot across the seven target identities, to check the clusters resolve into them before annotation.
+
+```{r markers}
+broad_markers <- list(
+  NeuronEx = c("Slc17a7", "Satb2", "Rbfox3", "Kcnd2", "Grik2", "Tenm1"), 
+  NeuronIn = c("Gad1", "Gad2", "Gria3", "Kcnma1", "Slc24a2"),   
+ Astro    = c("Aqp4", "Gfap", "Aldh1l1", "Slc1a3"),
+  Oligo    = c("Plp1", "Mbp", "Mog", "Mobp",  "Prr5l"), 
+  OPC      = c("Pdgfra", "Cspg4", "Olig1", "Olig2"),
+  Immune   = c("Csf1r", "C1qa", "Hexb", "P2ry12", "Ptprc"),
+  Vascular = c("Cldn5", "Flt1", "Pdgfrb", "Rgs5", "Dcn")
+ 
+ 
+)
+
+DotPlot(cortex, features = broad_markers) +
+  easy_rotate_x_labels(angle = -45)
+```
+
+```{r}
+cortex@meta.data %<>% 
+  as_tibble(rownames = "temp") %>% 
+  left_join(
+    tribble(
+      ~seurat_clusters, ~celltype, 
+      0, "Oligo", 
+      1, "NeuronEx", 
+      2, "NeuronMix", 
+      3, "NeuronEx", 
+      4, "NeuronEx", 
+      5, "NeuronIn", 
+      6, "NeuronIn", 
+      7, "NeuronEx", 
+      8, "NeuronEx", 
+      9, "NeuronEx", 
+      10, "NeuronIn", 
+      11, "NeuronEx", 
+      12, "NeuronIn", 
+      13, "Immune", 
+      14, "NeuronEx", 
+      15, "NeuronEx", 
+      16, "OPC", 
+      17, "NeuronEx", 
+      18, "Astro", 
+      19, "NeuronEx", 
+    ) %>% 
+      dplyr::mutate(
+        dplyr::across(seurat_clusters, as.factor)
+      )
+  ) %>% 
+  dplyr::select(orig.ident, celltype,everything()) %>% 
+  column_to_rownames("temp") 
+```
+
+# Pseudobulk
+## prepare DGE object
+```{r}
+y <- Seurat2PB(cortex, sample = "sample_id", cluster="celltype")
+
+y$samples %<>% 
+  as_tibble(rownames = "sample_cluster") %>% 
+  mutate(
+    sample_cluster = str_remove(sample_cluster, "cluster"), 
+    genotype = str_extract(sample, pattern = "WT|Het|SgshKO") %>% 
+      factor(levels = c("WT", "Het", "SgshKO")),
+    sample = str_extract(sample, pattern = "rep1|rep2"),
+    celltype = cluster, 
+    group = paste0(cluster, "_", genotype) %>% as.factor()
+  ) %>% 
+  dplyr::select(-cluster) %>% 
+  column_to_rownames("sample_cluster") 
+
+colnames(y$counts) %<>% str_remove("cluster")
+```
+
+## lib sizes
+```{r}
+y$samples %>% 
+  ggplot(
+    aes(
+      x = genotype, y = lib.size, 
+      )
+  ) +
+  geom_col(
+    aes(fill = sample),
+    position = "dodge"
+  ) +
+  scale_y_continuous(labels = comma) +
+  facet_wrap(~celltype, nrow = 1)
+```
+
+## filtering
+### samples
+Only retained cell type clusters per age if the cluster contained at least 20k reads, and had two samples per genotype. 
+
+not enough astrocyes in sgsh KO. 
+
+```{r}
+# retain samples with more than 20k counts
+keep.samples <- y$samples$lib.size > 2e4
+y <- y[,keep.samples]
+
+# check which samples only one sample per genotype age
+y$samples %>% 
+  ggplot(
+    aes(x = sample, y = lib.size, fill = genotype)
+  ) +
+  geom_col(
+    aes()
+  ) +
+  scale_y_continuous(labels = comma) +
+  facet_wrap(~celltype, scales = "free")
+```
+
+### genes
+```{r}
+design <- model.matrix(~0 + group, data = y$samples %>% 
+                         droplevels()) 
+colnames(design) <- str_remove(colnames(design), 
+                               "group")
+```
+
+```{r}
+keep.genes <- filterByExpr(y, group=y$samples$cluster, design = design)
+table(keep.genes)
+
+y <- y[keep.genes, , keep=FALSE]
+
+y <- normLibSizes(y, method = "TMM")
+
+y$samples %>% 
+  ggplot(
+    aes(y = lib.size*norm.factors, x = celltype, colour = genotype )
+  ) +
+  geom_boxplot() +
+  geom_point(position = position_jitterdodge()) +
+  facet_wrap(~celltype, scales = "free")
+
+y %>% 
+  cpm(log = T) %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = everything(), 
+               names_to = "sample", values_to = "logCPM") %>% 
+  left_join(y$samples %>% 
+              mutate(sample = rownames(y$samples))) %>% 
+  ggplot(
+    aes(x = genotype, y = logCPM)
+    ) +
+  geom_boxplot(
+    aes(fill = genotype),
+    outlier.size = 0.5
+               ) +
+  facet_wrap(~celltype, scales = "free_x", nrow = 1) +
+  easy_rotate_x_labels(angle = -45) +
+  labs(title = "Distribution of logCPM values per sample",
+       x = "Sample", y = "log2 CPM")
+```
+
+## PCA
+```{r}
+y$counts %>% 
+  cpm(log = TRUE) %>% 
+  t %>% 
+  prcomp %>% 
+  autoplot(
+    data = tibble(
+      sample = rownames(.$x)
+    ) %>% 
+      left_join(y$samples %>% 
+              mutate(sample = rownames(y$samples))
+              ),
+    colour = "celltype", 
+    shape = "genotype",
+    alpha = 0.5,
+    size = 6
+  ) +
+  theme(aspect.ratio = 1)
+  facet_wrap(~cluster, scales = "free") +
+  scale_color_viridis_d(option = "turbo")
+```
+
+## DE analysis
+### design matrix
+```{r}
+design <- model.matrix(~0 + group, data = y$samples %>% 
+                         droplevels()) 
+colnames(design) <- str_remove(colnames(design), 
+                               "group")
+```
+
+### dispersion estimate
+```{r}
+y <- estimateDisp(y, design, robust = TRUE)
+plotBCV(y)
+```
+
+## glmFit
+```{r}
+fit <- glmQLFit(y, design, robust = TRUE)
+plotQLDisp(fit)
+```
+
+## contrasts matrix
+```{r}
+# Extract cell types shared by both Control and NPC1
+design_cols <- colnames(design)
+
+design_df <- tibble(colname = colnames(design)) %>%
+  separate(colname, into = c("celltype",  "genotype"), sep = "_") %>%
+  unite("group_id", celltype, age, remove = FALSE)
+
+# Filter to groups that contain both WT and Npc_hom
+contrast_df <- 
+  design_df %>%
+  mutate(colname = paste0(celltype, "_", genotype)) %>% 
+  group_by(genotype) %>% 
+  pivot_wider(names_from = genotype, values_from = colname) %>% 
+  mutate(contrast = paste0(SgshKO, " - ", WT))
+
+# Build contrast matrix
+contrast_matrix <- makeContrasts(contrasts = contrast_df$contrast, levels = design)
+
+# rename columns for readability
+colnames(contrast_matrix) <- gsub("group", "", colnames(contrast_matrix))
+
+```
+
+## toptables
+```{r}
+toptables <- colnames(contrast_matrix) %>% 
+  sapply(function(x) {
+      glmQLFTest(fit, design, contrast=contrast_matrix[,x]) %>% 
+      topTags(n = Inf, sort.by = "PValue") %>% 
+      .$table %>% 
+      as_tibble %>% 
+      dplyr::select(
+        gene, logCPM, logFC, PValue, FDR, everything()
+      ) %>% 
+      mutate(
+        coef = x, 
+        coef = str_remove(coef, pattern = "_Npc1 - .+$"),
+        DE = FDR < 0.05
+      ) %>% 
+      dplyr::select(-starts_with("vf"), -starts_with("var"))
+  }, simplify = F)
+```
+## volcanoplots
+```{r}
+volcano_data <- 
+  toptables %>%
+  bind_rows() %>% 
+  mutate(
+  coef = str_remove(coef, pattern = "_SgshKO.+$"),
+    DE = FDR < 0.05
+  ) 
+
+# Count number of DE up/down per celltype (coef)
+volcano_labels <- volcano_data %>%
+  dplyr::filter(DE) %>%
+  mutate(direction = ifelse(logFC > 0, "Up", "Down")) %>%
+  group_by(coef, direction) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(
+    x = ifelse(direction == "Up", 3, -3),  # approximate x positions
+    y = max(-log10(volcano_data$PValue), na.rm = TRUE) * 0.9,  # high y
+    label = paste0(direction, ": ", n)
+  )
+
+# Plot
+ggplot(volcano_data, aes(x = logFC, y = -log10(PValue))) +
+  geom_point(aes(colour = DE)) +
+  scale_color_manual(values = c("grey50", "red")) +
+  facet_wrap(~coef) +
+  geom_text(
+    data = volcano_labels,
+    aes(x = x, y = y, label = label),
+    inherit.aes = FALSE,
+    size = 4,
+    hjust = 0.5
+  ) +
+  labs(
+    x = "log2 Fold Change",
+    y = "-log10(P value)"
+  ) 
+```
+
+# enrichment analysis of the communiites
+
+```{r}
+# import clusters
+cluster.gprofiler.results <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "gprofiler", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/gprofiler_analysis_results.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes.cluster.DLB <- 
+  cluster.gprofiler.results$CD_1A_lyso_DLB %>% 
+  dplyr::select(Cluster, genes) %>% 
+  mutate(genes = str_split(genes, " ")) %>% 
+  deframe() %>% 
+  lapply(function(x) {
+    x %>% 
+      as_tibble %>% 
+      set_colnames("human")
+  })
+
+# download the mouse2human id conversion
+mouse_human_genes = read.csv("http://www.informatics.jax.org/downloads/reports/HOM_MouseHumanSequence.rpt",sep="\t")
+
+convert_mouse_to_human <- function(gene_list){
+
+# Filter to mouse genes in gene_list
+  mouse_subset <- mouse_human_genes %>%
+    dplyr::filter(Common.Organism.Name == "mouse, laboratory", Symbol %in% gene_list)
+
+  # Join with human genes via DB.Class.Key
+  result <- mouse_subset %>%
+    left_join(
+      mouse_human_genes %>%
+        dplyr::filter(Common.Organism.Name == "human") %>%
+        dplyr::select(DB.Class.Key, human_symbol = Symbol),
+      by = "DB.Class.Key"
+    ) %>%
+    dplyr::select(mouse = Symbol, human = human_symbol) %>%
+    dplyr::distinct() %>% 
+    as_tibble
+
+  return(result)
+}
+
+network.genes.cluster.DLB %<>% 
+  lapply(function(x) {
+    x %>% 
+      left_join(convert_mouse_to_human(rownames(y))) %>% 
+      na.omit() %>% 
+      .$mouse %>% 
+      unique()
+  })
+
+
+# for gene set testing, only retain clusters with more than 3 genes
+network.genes.cluster.DLB <-
+  network.genes.cluster.DLB[lapply(network.genes.cluster.DLB, length) > 3]
+
+### obtain the genes in the subnetworks
+node_metadata <- 
+  list.files(path = "data/results/adultchildsubtypes v2", 
+             pattern = "overlapping_nodes_metadata", recursive = TRUE, full.names = TRUE) %>% 
+  set_names(
+    str_replace(., 
+                pattern = "/overlapping_nodes_metadata.csv",
+                replacement = ""
+    ) %>% 
+      str_remove(
+        pattern = paste0("data/results/adultchildsubtypes v2", "/")
+      )
+  ) %>%   
+  map(read.csv) %>%
+  imap(~ mutate(.x, comparison = .y))
+
+network.genes <- node_metadata$CD_1A_lyso_DLB
+
+network.genes %<>% 
+  dplyr::select(human = X, everything()) %>% 
+  left_join(convert_mouse_to_human(rownames(y))) %>% 
+  na.omit %>% 
+  dplyr::select(gene_name = mouse, everything())
+
+network.genes.cluster.DLB
+```
+
+
+
+
+
+
+
+
